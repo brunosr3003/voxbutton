@@ -3,8 +3,8 @@
 
 Click to start recording, click again to transcribe. The recording itself
 happens wherever the mic agent runs (the Mac app), the text is typed here by
-the voxbutton server. The window never takes keyboard focus, so the text lands
-in whatever window you were typing in.
+the voxbutton server. Clicking it hands keyboard focus straight back to the
+window you were typing in, so that's where the text lands.
 
 Usage: voxbutton-button.py [--server http://host:8765] [--x EXPR] [--y EXPR]
 """
@@ -25,7 +25,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-APP_ID = "voxbutton"
+APP_ID = "voxbutton-button"
 SIZE = 64
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
 
@@ -47,18 +47,54 @@ def default_server() -> str:
     return f"http://{ip[0] if ip else '127.0.0.1'}:8765"
 
 
+def hypr(*args: str) -> str:
+    try:
+        return subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
 def add_window_rule(x: str, y: str) -> None:
-    """Float, pin to every workspace and never take focus. Added at runtime so
-    the Hyprland config doesn't have to be touched (saving it reloads it)."""
+    """Float and pin to every workspace, without grabbing focus on open or on
+    hover. Added at runtime so the Hyprland config doesn't have to be touched
+    (saving it reloads it). no_focus is not an option: such windows get no
+    clicks at all."""
     lua = (
-        'hl.window_rule({ match = { class = "^(%s)$" }, float = true, pin = true, no_focus = true, '
-        "decorate = false, border_size = 0, no_shadow = true, no_blur = true, no_anim = true, "
+        'hl.window_rule({ match = { class = "^(%s)$" }, float = true, pin = true, '
+        "no_initial_focus = true, no_follow_mouse = true, decorate = false, border_size = 0, no_shadow = true, no_blur = true, no_anim = true, "
         'size = { %d, %d }, move = { "%s", "%s" } })' % (APP_ID, SIZE, SIZE, x, y)
     )
-    try:
-        subprocess.run(["hyprctl", "eval", lua], capture_output=True, timeout=5)
-    except (OSError, subprocess.TimeoutExpired):
-        print("hyprctl not available; the window will be a normal one", file=sys.stderr)
+    hypr("eval", lua)
+
+
+class FocusKeeper:
+    """Remembers the window you were typing in: the last one that held focus
+    for a moment (so windows the pointer merely crosses don't count)."""
+
+    DWELL = 0.6  # s
+
+    def __init__(self):
+        self.target: str | None = None
+        self._seen: tuple[str, float] | None = None
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self) -> None:
+        while True:
+            try:
+                w = json.loads(hypr("activewindow", "-j") or "{}")
+            except ValueError:
+                w = {}
+            addr = w.get("address")
+            if addr and w.get("class") != APP_ID:
+                if not self._seen or self._seen[0] != addr:
+                    self._seen = (addr, time.time())
+                elif time.time() - self._seen[1] >= self.DWELL:
+                    self.target = addr
+            time.sleep(0.2)
+
+    def restore(self) -> None:
+        if self.target:
+            hypr("dispatch", 'hl.dsp.focus({ window = "address:%s" })' % self.target)
 
 
 class Client:
@@ -85,6 +121,7 @@ class Button(Gtk.ApplicationWindow):
     def __init__(self, app: Gtk.Application, client: Client):
         super().__init__(application=app, title="voxbutton")
         self.client = client
+        self.focus = FocusKeeper()
         self.state = "offline"
         self.flash_until = 0.0
         self.flash_kind = ""
@@ -103,7 +140,7 @@ class Button(Gtk.ApplicationWindow):
         self.set_child(self.area)
 
         click = Gtk.GestureClick()
-        click.connect("released", self.on_click)
+        click.connect("pressed", self.on_click)
         self.area.add_controller(click)
 
         threading.Thread(target=self.poll_loop, daemon=True).start()
@@ -122,6 +159,7 @@ class Button(Gtk.ApplicationWindow):
             return
 
         def go():
+            self.focus.restore()
             r = self.client.call("POST", "/record/toggle")
             GLib.idle_add(self.apply_state, r)
 

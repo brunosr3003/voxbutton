@@ -19,8 +19,8 @@ lives on the Linux desktop, and the Mac lends it its microphone:
 └───────────────────────────────┘                └──────────────────────┘
 ```
 
-- The button floats on every workspace and never takes keyboard focus, so the
-  text lands where you were typing.
+- The button floats on every workspace. Clicking it hands keyboard focus
+  straight back to the window you were typing in, so the text lands there.
 - Transcription runs on your machine. No cloud APIs.
 - Text is typed with `wtype` (Wayland virtual keyboard), so accents and Unicode
   come through correctly.
@@ -70,8 +70,9 @@ Useful options (`uv run voxbutton-server --help`):
 ## Linux button
 
 Needs Python with GTK 4 bindings (`python-gobject`) and Hyprland. The script
-registers its own window rules at runtime (float, pin, no focus), so the Hyprland
-config isn't touched.
+registers its own window rules at runtime (float, pin, no focus on open or on
+hover), so the Hyprland config isn't touched. It can't use Hyprland's `no_focus`,
+because windows with that rule receive no clicks.
 
 ```sh
 linux/voxbutton-button.py            # right edge, vertically centered
