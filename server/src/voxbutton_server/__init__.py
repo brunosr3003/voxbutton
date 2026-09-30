@@ -14,6 +14,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
 TOKEN_FILE = CONFIG_DIR / "token"
@@ -91,6 +92,10 @@ def make_handler(transcribe: Transcriber, token: str, do_type: bool, trusted: se
         def log_message(self, *args):
             pass
 
+        def log_error(self, fmt, *args):
+            # Surfaces e.g. a client speaking TLS to this plain-HTTP port.
+            log(f"{self.client_address[0]}: " + fmt % args)
+
         def reply(self, code: int, body: dict) -> None:
             data = json.dumps(body).encode()
             self.send_response(code)
@@ -102,17 +107,20 @@ def make_handler(transcribe: Transcriber, token: str, do_type: bool, trusted: se
         def authorized(self) -> bool:
             if self.client_address[0] in trusted:
                 return True
-            got = self.headers.get("Authorization", "")
-            return secrets.compare_digest(got, f"Bearer {token}")
+            got = self.headers.get("Authorization", "").removeprefix("Bearer ")
+            if not got:
+                # Also accepted as ?token=..., so clients like iOS Shortcuts only need a URL.
+                got = parse_qs(urlsplit(self.path).query).get("token", [""])[0]
+            return secrets.compare_digest(got.encode(), token.encode())
 
         def do_GET(self):
-            if self.path == "/health":
+            if urlsplit(self.path).path == "/health":
                 self.reply(200, {"ok": True})
             else:
                 self.reply(404, {"error": "not found"})
 
         def do_POST(self):
-            if not self.path.startswith("/transcribe"):
+            if urlsplit(self.path).path != "/transcribe":
                 return self.reply(404, {"error": "not found"})
             if not self.authorized():
                 return self.reply(401, {"error": "bad token"})

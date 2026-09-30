@@ -96,16 +96,18 @@ VoxButton to System Settings → General → Login Items.
 ## iPhone (iOS Shortcut)
 
 Moonlight doesn't forward the phone's microphone, but a Shortcut can record and
-send audio on its own, even while Moonlight stays in the foreground. If the
-iPhone is on the same Tailscale network, start the server with
-`--trust <iphone-tailscale-ip>` so the Shortcut doesn't need the token. Tailscale
-already authenticates the device.
+send audio on its own, even while Moonlight stays in the foreground.
+
+iOS Shortcuts insists on HTTPS, so put the server behind a TLS reverse proxy.
+For example, use nginx with a Let's Encrypt certificate on a VPS, reaching the
+PC through `ssh -R 127.0.0.1:18765:<pc-ip>:8765 vps`. Pass the token in the URL
+so the Shortcut needs no custom headers.
 
 Create a Shortcut with two actions:
 
 1. **Record Audio**. Set Start Recording to *Immediately*, and Finish Recording
    to *On Tap*.
-2. **Get Contents of URL**. URL `http://<pc-tailscale-ip>:8765/transcribe`,
+2. **Get Contents of URL**. URL `https://your.domain/transcribe?token=<token>`,
    Method *POST*, Request Body *File*, file = *Recorded Audio*.
 
 Then bind it to Settings → Accessibility → Touch → **Back Tap** (double tap), or
@@ -114,8 +116,8 @@ the text is typed on the PC. The server accepts `.m4a` as well as WAV.
 
 ## API
 
-`POST /transcribe` with the WAV file as the body and
-`Authorization: Bearer <token>`. Optional headers: `X-Language: en` and
+`POST /transcribe` with the audio file as the body and
+`Authorization: Bearer <token>` (or `?token=<token>`). Optional headers: `X-Language: en` and
 `X-Type: 0` (don't type, just return the text). The response is
 `{"text": "...", "language": "en", "typed": true}`.
 
