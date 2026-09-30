@@ -4,23 +4,28 @@ A floating microphone button for voice coding. Click it, talk, click again. Your
 speech is transcribed by Whisper running locally on your own GPU and typed into
 whatever window has focus, such as a terminal running Claude Code or your editor.
 
-It's built for a setup where you sit at a Mac and drive a Linux box remotely
-(for example through Moonlight/Sunshine):
+It's built for a setup where you drive a Linux box remotely (for example from a
+Mac through Moonlight/Sunshine, which doesn't forward the microphone). The button
+lives on the Linux desktop, and the Mac lends it its microphone:
 
 ```
- Mac                                   Linux PC (GPU)
-┌──────────────────────┐   HTTP over  ┌────────────────────────────────┐
-│ VoxButton.app        │  Tailscale   │ voxbutton-server               │
-│ floating button,     │ ───────────▶ │ faster-whisper (large-v3-turbo)│
-│ records the Mac mic  │   WAV audio  │ → wtype into the focused window│
-└──────────────────────┘              └────────────────────────────────┘
+ Linux PC (GPU)                                       Mac
+┌───────────────────────────────┐    Tailscale   ┌──────────────────────┐
+│ voxbutton-button (GTK)        │                │ VoxButton.app        │
+│   click → /record/toggle      │                │ (no window; agent)   │
+│ voxbutton-server              │ ── start ────▶ │ records the Mac mic  │
+│   faster-whisper on the GPU   │ ◀── audio ──── │                      │
+│   → wtype into focused window │                │                      │
+└───────────────────────────────┘                └──────────────────────┘
 ```
 
-- The button floats above everything, including fullscreen apps, on every Space.
-  Clicking it never steals focus from the app you're typing into.
+- The button floats on every workspace and never takes keyboard focus, so the
+  text lands where you were typing.
 - Transcription runs on your machine. No cloud APIs.
 - Text is typed with `wtype` (Wayland virtual keyboard), so accents and Unicode
   come through correctly.
+- Silence is skipped instead of being handed to Whisper, which likes to
+  hallucinate on it.
 
 ## Linux server
 
@@ -55,10 +60,32 @@ Useful options (`uv run voxbutton-server --help`):
 |---|---|---|
 | `--model` | `large-v3-turbo` | any faster-whisper model (`small`, `medium`, `large-v3`…) |
 | `--language` | auto | force a language, e.g. `en` or `pt` |
+| `--languages` | any | languages auto-detection may pick, e.g. `en,pt` |
+| `--min-level` | `-34` | clips quieter than this (dBFS, loudest 100 ms) count as silence |
 | `--prompt` | none | bias the vocabulary: project names, jargon |
 | `--host` / `--port` | Tailscale IP / 8765 | |
 | `--no-type` | | only return the text |
 | `--trust IP` | | accept this IP without a token (repeatable) |
+
+## Linux button
+
+Needs Python with GTK 4 bindings (`python-gobject`) and Hyprland. The script
+registers its own window rules at runtime (float, pin, no focus), so the Hyprland
+config isn't touched.
+
+```sh
+linux/voxbutton-button.py            # right edge, vertically centered
+linux/voxbutton-button.py --x 20 --y "monitor_h-84"   # bottom-left
+```
+
+States: dark = ready, red (pulsing) = recording, orange = transcribing,
+green = typed, purple = error, faded gray = no microphone agent connected.
+
+For Hyprland autostart, next to the server:
+
+```lua
+hl.exec_cmd("/path/to/voxbutton/linux/voxbutton-button.py")
+```
 
 ## Mac app
 
@@ -80,7 +107,9 @@ Create `~/.config/voxbutton/config.json`:
 ```
 
 `language` is optional. Set it if auto-detection picks the wrong language, which
-can happen with an accent.
+can happen with an accent. By default the app has no window. It waits for the
+Linux button in the background. Add `"button": true` to get a floating button on
+the Mac as well.
 
 Using it:
 

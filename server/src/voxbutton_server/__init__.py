@@ -60,25 +60,58 @@ def type_text(text: str) -> None:
 
 
 class Transcriber:
-    def __init__(self, model: str, device: str, compute_type: str, language: str | None, prompt: str | None):
+    def __init__(self, model: str, device: str, compute_type: str, language: str | None, prompt: str | None,
+                 languages: list[str], min_level: float):
         from faster_whisper import WhisperModel
 
         t = time.time()
         self.model = WhisperModel(model, device=device, compute_type=compute_type)
         self.language = language
         self.prompt = prompt
+        self.languages = languages
+        self.min_level = min_level
         self.lock = threading.Lock()
         log(f"model {model} loaded on {device} in {time.time() - t:.1f}s")
 
+    def loudest(self, samples) -> float:
+        """dBFS of the loudest 100 ms window."""
+        import numpy as np
+
+        w = 1600  # 100 ms at 16 kHz
+        n = len(samples) // w
+        if n == 0:
+            return -120.0
+        rms = np.sqrt((samples[: n * w].reshape(n, w) ** 2).mean(axis=1))
+        return float(20 * np.log10(max(rms.max(), 1e-6)))
+
     def __call__(self, audio: bytes, language: str | None) -> tuple[str, str]:
-        with self.lock:
-            segments, info = self.model.transcribe(
-                io.BytesIO(audio),
-                language=language or self.language,
+        from faster_whisper.audio import decode_audio
+
+        samples = decode_audio(io.BytesIO(audio))
+        # Whisper invents text on silence ("Thank you.", "Продолжение следует..."),
+        # and neither VAD nor no_speech_prob catch it; loudness does.
+        level = self.loudest(samples)
+        if level < self.min_level:
+            log(f"silence ({level:.1f} dBFS < {self.min_level}), skipped")
+            return "", ""
+
+        def run(lang):
+            return self.model.transcribe(
+                samples,
+                language=lang,
                 initial_prompt=self.prompt,
                 vad_filter=True,
                 beam_size=5,
+                condition_on_previous_text=False,
             )
+
+        with self.lock:
+            segments, info = run(language or self.language)
+            if self.languages and info.language not in self.languages:
+                # Segments are lazy, so re-running with the likeliest allowed language costs nothing extra.
+                probs = dict(info.all_language_probs or [])
+                best = max(self.languages, key=lambda l: probs.get(l, 0))
+                segments, info = run(best)
             text = " ".join(s.text.strip() for s in segments).strip()
         return text, info.language
 
@@ -261,6 +294,10 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--compute-type", default="float16")
     ap.add_argument("--language", help="force a language (e.g. en, pt); default: auto-detect")
+    ap.add_argument("--languages", default="",
+                    help="comma-separated languages auto-detection may pick from (e.g. en,pt)")
+    ap.add_argument("--min-level", type=float, default=-34,
+                    help="skip clips whose loudest 100 ms is quieter than this, in dBFS (default -34)")
     ap.add_argument("--prompt", help="initial prompt to bias vocabulary (names, jargon)")
     ap.add_argument("--trust", action="append", default=[], metavar="IP",
                     help="accept requests from this IP without a token (e.g. a Tailscale device); repeatable")
@@ -276,7 +313,8 @@ def main() -> None:
         sys.exit("wtype not found: install it (e.g. `sudo pacman -S wtype`) or pass --no-type")
 
     host = args.host or tailscale_ip() or "127.0.0.1"
-    transcriber = Transcriber(args.model, args.device, args.compute_type, args.language, args.prompt)
+    transcriber = Transcriber(args.model, args.device, args.compute_type, args.language, args.prompt,
+                              [l for l in args.languages.split(",") if l], args.min_level)
     server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, Remote(), token, not args.no_type, set(args.trust)))
     log(f"listening on http://{host}:{args.port} (token in {TOKEN_FILE})")
     try:
