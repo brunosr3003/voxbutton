@@ -155,7 +155,8 @@ final class Agent: ObservableObject {
     private func pollLoop() async {
         while !Task.isCancelled {
             guard let req = request("/agent/wait", query: [.init(name: "name", value: "iphone"),
-                                                           .init(name: "prio", value: "1")]) else {
+                                                           .init(name: "prio", value: "1"),
+                                                           .init(name: "ips", value: localIPv4s().joined(separator: ","))]) else {
                 status = "Set the server URL"
                 try? await Task.sleep(for: .seconds(5))
                 continue
@@ -213,6 +214,26 @@ final class Agent: ObservableObject {
                 _ = try? await URLSession.shared.data(for: e)
             }
         }
+    }
+
+    /// This phone's IPv4 addresses (Wi-Fi, cellular, the Tailscale tunnel), so the
+    /// server can tell it's the device Moonlight is streaming to.
+    private func localIPv4s() -> [String] {
+        var out: [String] = []
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0 else { return out }
+        defer { freeifaddrs(head) }
+        var p = head
+        while let ifa = p?.pointee {
+            if let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET), (ifa.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 {
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    out.append(String(cString: host))
+                }
+            }
+            p = ifa.ifa_next
+        }
+        return out
     }
 
     private func wav(_ pcm: Data) -> Data {

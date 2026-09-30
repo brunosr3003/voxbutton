@@ -116,6 +116,47 @@ class Transcriber:
         return text, info.language
 
 
+class StreamWatcher:
+    """Finds the device you're streaming to (Moonlight over Tailscale): it's the
+    Tailscale peer this machine is sending video to, megabits per second, while
+    every other peer gets next to nothing."""
+
+    INTERVAL = 2.0
+    MIN_RATE = 500_000  # bit/s
+    STICKY = 20  # s to keep the last streaming peer through a quiet moment
+
+    def __init__(self):
+        self.peer: str | None = None
+        self.rate = 0.0
+        self.seen = 0.0
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    @staticmethod
+    def _snapshot() -> dict[str, int]:
+        try:
+            out = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5)
+            peers = json.loads(out.stdout).get("Peer") or {}
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return {}
+        return {ip: p.get("TxBytes", 0) for p in peers.values() for ip in p.get("TailscaleIPs", [])[:1]}
+
+    def _loop(self) -> None:
+        prev = self._snapshot()
+        while True:
+            time.sleep(self.INTERVAL)
+            cur = self._snapshot()
+            rates = {ip: (tx - prev[ip]) * 8 / self.INTERVAL for ip, tx in cur.items() if ip in prev}
+            prev = cur
+            ip, rate = max(rates.items(), key=lambda kv: kv[1], default=(None, 0))
+            if ip and rate >= self.MIN_RATE:
+                if ip != self.peer:
+                    log(f"streaming to {ip} ({rate / 1e6:.1f} Mbit/s)")
+                self.peer, self.rate, self.seen = ip, rate, time.time()
+
+    def current(self) -> str | None:
+        return self.peer if time.time() - self.seen < self.STICKY else None
+
+
 class Remote:
     """Lets a button on this machine drive a microphone on another one.
 
@@ -123,14 +164,16 @@ class Remote:
     and post the recording to /transcribe like any other client; the button
     calls /record/toggle and polls /state to show what's happening.
 
-    Each agent says how good a pick it is right now (its priority): the Mac
-    reports 2 while Moonlight is in front and 0 otherwise, the iPhone always 1.
-    A recording goes to the best one, and its stop goes to the same agent."""
+    A recording goes to the agent on the device the screen is being streamed
+    to (matched by IP, see StreamWatcher). Without a stream, each agent's own
+    priority decides: the Mac reports 2 while Moonlight is in front and 0
+    otherwise, the iPhone always 1. The stop goes to the same agent."""
 
     AGENT_TIMEOUT = 35  # s without a poll before the agent counts as gone
     MAX_RECORDING = 300  # s, safety net if the stop never arrives
 
-    def __init__(self):
+    def __init__(self, stream: "StreamWatcher | None" = None):
+        self.stream = stream
         self.cond = threading.Condition()
         self.state = "idle"  # idle | recording | busy
         self.since = time.time()
@@ -147,12 +190,19 @@ class Remote:
         return {n: a for n, a in self.agents.items() if now - a["seen"] < self.AGENT_TIMEOUT}
 
     def _best(self) -> str | None:
-        ready = [(a["prio"], a["seen"], n) for n, a in self._alive().items() if a["prio"] > 0]
+        alive = self._alive()
+        peer = self.stream.current() if self.stream else None
+        if peer:
+            for n, a in alive.items():
+                if peer in a.get("ips", ()):
+                    return n
+        ready = [(a["prio"], a["seen"], n) for n, a in alive.items() if a["prio"] > 0]
         return max(ready)[2] if ready else None
 
-    def wait(self, name: str, prio: int, timeout: float = 25) -> str | None:
+    def wait(self, name: str, prio: int, ips: set[str] = frozenset(), timeout: float = 25) -> str | None:
         with self.cond:
             a = self.agents.setdefault(name, {"gen": 0})
+            a["ips"] = set(ips)
             a["gen"] += 1  # a newer poll from the same agent supersedes this one
             gen = a["gen"]
             a["seen"], a["prio"] = time.time(), prio
@@ -253,7 +303,11 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                     prio = int(q.get("prio", ["1"])[0])
                 except ValueError:
                     prio = 1
-                self.reply(200, {"cmd": remote.wait(name, prio)})
+                # Direct clients are known by their address; behind the TLS proxy
+                # they report their own (e.g. the iPhone's Tailscale IP).
+                ips = {ip for ip in q.get("ips", [""])[0].split(",") if ip}
+                ips.add(self.client_address[0])
+                self.reply(200, {"cmd": remote.wait(name, prio, ips)})
             else:
                 self.reply(404, {"error": "not found"})
 
@@ -343,7 +397,7 @@ def main() -> None:
     host = args.host or tailscale_ip() or "127.0.0.1"
     transcriber = Transcriber(args.model, args.device, args.compute_type, args.language, args.prompt,
                               [l for l in args.languages.split(",") if l], args.min_level)
-    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, Remote(), token, not args.no_type, set(args.trust)))
+    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, Remote(StreamWatcher()), token, not args.no_type, set(args.trust)))
     log(f"listening on http://{host}:{args.port} (token in {TOKEN_FILE})")
     try:
         server.serve_forever()
