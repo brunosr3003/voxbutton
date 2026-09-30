@@ -58,6 +58,7 @@ Useful options (`uv run voxbutton-server --help`):
 | `--prompt` | none | bias the vocabulary: project names, jargon |
 | `--host` / `--port` | Tailscale IP / 8765 | |
 | `--no-type` | | only return the text |
+| `--trust IP` | | accept this IP without a token (repeatable) |
 
 ## Mac app
 
@@ -91,6 +92,25 @@ Using it:
 
 The first recording asks for microphone permission. To start it at login, add
 VoxButton to System Settings → General → Login Items.
+
+## iPhone (iOS Shortcut)
+
+Moonlight doesn't forward the phone's microphone, but a Shortcut can record and
+send audio on its own, even while Moonlight stays in the foreground. If the
+iPhone is on the same Tailscale network, start the server with
+`--trust <iphone-tailscale-ip>` so the Shortcut doesn't need the token. Tailscale
+already authenticates the device.
+
+Create a Shortcut with two actions:
+
+1. **Record Audio**. Set Start Recording to *Immediately*, and Finish Recording
+   to *On Tap*.
+2. **Get Contents of URL**. URL `http://<pc-tailscale-ip>:8765/transcribe`,
+   Method *POST*, Request Body *File*, file = *Recorded Audio*.
+
+Then bind it to Settings → Accessibility → Touch → **Back Tap** (double tap), or
+to the Action Button. Double-tap the back of the phone, talk, tap to stop, and
+the text is typed on the PC. The server accepts `.m4a` as well as WAV.
 
 ## API
 

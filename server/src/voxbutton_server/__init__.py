@@ -86,7 +86,7 @@ def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
-def make_handler(transcribe: Transcriber, token: str, do_type: bool):
+def make_handler(transcribe: Transcriber, token: str, do_type: bool, trusted: set[str]):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -100,6 +100,8 @@ def make_handler(transcribe: Transcriber, token: str, do_type: bool):
             self.wfile.write(data)
 
         def authorized(self) -> bool:
+            if self.client_address[0] in trusted:
+                return True
             got = self.headers.get("Authorization", "")
             return secrets.compare_digest(got, f"Bearer {token}")
 
@@ -150,6 +152,8 @@ def main() -> None:
     ap.add_argument("--compute-type", default="float16")
     ap.add_argument("--language", help="force a language (e.g. en, pt); default: auto-detect")
     ap.add_argument("--prompt", help="initial prompt to bias vocabulary (names, jargon)")
+    ap.add_argument("--trust", action="append", default=[], metavar="IP",
+                    help="accept requests from this IP without a token (e.g. a Tailscale device); repeatable")
     ap.add_argument("--no-type", action="store_true", help="only return the text, don't type it")
     ap.add_argument("--print-token", action="store_true", help="print the auth token and exit")
     args = ap.parse_args()
@@ -163,7 +167,7 @@ def main() -> None:
 
     host = args.host or tailscale_ip() or "127.0.0.1"
     transcriber = Transcriber(args.model, args.device, args.compute_type, args.language, args.prompt)
-    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, token, not args.no_type))
+    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, token, not args.no_type, set(args.trust)))
     log(f"listening on http://{host}:{args.port} (token in {TOKEN_FILE})")
     try:
         server.serve_forever()
