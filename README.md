@@ -79,7 +79,31 @@ linux/voxbutton-button.py            # right edge, vertically centered
 linux/voxbutton-button.py --x 20 --y "monitor_h-84"   # bottom-left
 ```
 
-States: dark = ready, red (pulsing) = recording, orange = transcribing,
+**Left-click** dictates: the text is typed where you were. **Right-click**
+records a **voice command** instead (the button turns blue while it listens):
+
+| say | does |
+|---|---|
+| `next tab` / `previous tab` | ctrl+Tab / ctrl+shift+Tab |
+| `new tab` / `close tab` | per app (ctrl+shift+t / ctrl+shift+q in terminals, ctrl+t / ctrl+w elsewhere) |
+| `tab 3` | alt+3 (browsers) |
+| `workspace 2` | switch Hyprland workspace |
+| `window left` / `focus right` | move focus between windows |
+| `enter`, `send` | Return |
+| `escape`, `cancel`, `stop` | Escape |
+| `delete that` | erase the last dictation |
+| `clear line`, `backspace` | |
+| `scroll up` / `scroll down` | Page Up/Down (shift+ in terminals) |
+| `copy`, `paste`, `select all` | per app |
+| `go back`, `go forward`, `reload` | browser navigation |
+| `up`, `down`, `left`, `right` | arrow keys |
+| `option 2` | types "2" (Claude Code menus) |
+| `type <anything>` | types the rest verbatim |
+
+Add `N times` to repeat (`next tab 3 times`). Commands are English only. They
+live in `server/src/voxbutton_server/commands.py`, one small function each.
+
+States: dark = ready, red (pulsing) = dictating, blue = listening for a command, orange = transcribing,
 green = typed, purple = error, faded gray = no microphone agent connected.
 
 For Hyprland autostart, next to the server:
@@ -148,7 +172,8 @@ the text is typed on the PC. The server accepts `.m4a` as well as WAV.
 
 `POST /transcribe` with the audio file as the body and
 `Authorization: Bearer <token>` (or `?token=<token>`). Optional headers: `X-Language: en` and
-`X-Type: 0` (don't type, just return the text). The response is
+`X-Type: 0` (don't type, just return the text), and `?mode=command` to run the
+speech as a voice command instead of typing it. The response is
 `{"text": "...", "language": "en", "typed": true}`.
 
 ```sh

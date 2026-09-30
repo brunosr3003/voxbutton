@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Floating microphone button for Hyprland.
 
-Click to start recording, click again to transcribe. The recording itself
+Left-click to dictate, right-click for a voice command ("next tab",
+"workspace 2", "send"...); click again (either button) to stop. The recording itself
 happens wherever the mic agent runs (the Mac app), the text is typed here by
 the voxbutton server. Clicking it hands keyboard focus straight back to the
 window you were typing in, so that's where the text lands.
@@ -33,6 +34,7 @@ COLORS = {
     "offline": (0.35, 0.35, 0.38, 0.55),
     "idle": (0.13, 0.13, 0.15, 0.88),
     "recording": (0.90, 0.20, 0.20, 1.0),
+    "command": (0.20, 0.45, 0.95, 1.0),
     "busy": (0.95, 0.60, 0.10, 1.0),
     "done": (0.20, 0.75, 0.35, 1.0),
     "error": (0.60, 0.30, 0.85, 1.0),
@@ -123,6 +125,7 @@ class Button(Gtk.ApplicationWindow):
         self.client = client
         self.focus = FocusKeeper()
         self.state = "offline"
+        self.mode = "chat"
         self.flash_until = 0.0
         self.flash_kind = ""
         self.set_decorated(False)
@@ -140,6 +143,7 @@ class Button(Gtk.ApplicationWindow):
         self.set_child(self.area)
 
         click = Gtk.GestureClick()
+        click.set_button(0)  # any button: left = dictation, right = command
         click.connect("pressed", self.on_click)
         self.area.add_controller(click)
 
@@ -154,13 +158,14 @@ class Button(Gtk.ApplicationWindow):
             GLib.idle_add(self.apply_state, s)
             time.sleep(0.25)
 
-    def on_click(self, *_):
+    def on_click(self, gesture, *_):
         if self.state == "busy":
             return
+        mode = "command" if gesture.get_current_button() == 3 else "chat"
 
         def go():
             self.focus.restore()
-            r = self.client.call("POST", "/record/toggle")
+            r = self.client.call("POST", f"/record/toggle?mode={mode}")
             GLib.idle_add(self.apply_state, r)
 
         threading.Thread(target=go, daemon=True).start()
@@ -175,6 +180,7 @@ class Button(Gtk.ApplicationWindow):
                 self.state = "offline" if "agent" not in s else self.state
         else:
             self.state = s["state"] if s.get("agent") or s["state"] != "idle" else "offline"
+            self.mode = s.get("mode", "chat")
             if s.get("flash"):
                 self.flash(s["flash"])
         self.area.queue_draw()
@@ -192,7 +198,8 @@ class Button(Gtk.ApplicationWindow):
 
     def draw(self, _area, cr, w, h):
         look = self.flash_kind if time.time() < self.flash_until else self.state
-        r, g, b, a = COLORS.get(look, COLORS["idle"])
+        color = "command" if look == "recording" and self.mode == "command" else look
+        r, g, b, a = COLORS.get(color, COLORS["idle"])
         cx, cy, rad = w / 2, h / 2, min(w, h) / 2 - 4
         if look == "recording":
             pulse = 0.5 + 0.5 * math.sin(time.time() * 5)

@@ -16,6 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from voxbutton_server import commands
+
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
 TOKEN_FILE = CONFIG_DIR / "token"
 MAX_BODY = 50 * 1024 * 1024  # ~25 min of 16 kHz mono WAV
@@ -84,7 +86,7 @@ class Transcriber:
         rms = np.sqrt((samples[: n * w].reshape(n, w) ** 2).mean(axis=1))
         return float(20 * np.log10(max(rms.max(), 1e-6)))
 
-    def __call__(self, audio: bytes, language: str | None) -> tuple[str, str]:
+    def __call__(self, audio: bytes, language: str | None, prompt: str | None = None) -> tuple[str, str]:
         from faster_whisper.audio import decode_audio
 
         samples = decode_audio(io.BytesIO(audio))
@@ -99,7 +101,7 @@ class Transcriber:
             return self.model.transcribe(
                 samples,
                 language=lang,
-                initial_prompt=self.prompt,
+                initial_prompt=prompt or self.prompt,
                 vad_filter=True,
                 beam_size=5,
                 condition_on_previous_text=False,
@@ -180,6 +182,7 @@ class Remote:
         self.agents: dict[str, dict] = {}  # name -> {"seen", "prio", "gen"}
         self.cmds: dict[str, str] = {}
         self.active: str | None = None
+        self.mode = "chat"  # of the current recording: "chat" types, "command" acts
         self.flash = ("", 0.0)  # ("done" | "error", when)
 
     def _set(self, state: str) -> None:
@@ -213,7 +216,7 @@ class Remote:
                 return None
             return self.cmds.pop(name, None)
 
-    def toggle(self) -> str:
+    def toggle(self, mode: str = "chat") -> str:
         with self.cond:
             if self.state == "idle":
                 best = self._best()
@@ -221,9 +224,10 @@ class Remote:
                     self.flash = ("error", time.time())
                     return "no microphone available" if self._alive() else "no microphone agent connected"
                 self.active = best
+                self.mode = mode
                 self.cmds[best] = "start"
                 self._set("recording")
-                log(f"recording on {best}")
+                log(f"recording {mode} on {best}")
             elif self.state == "recording" and self.active:
                 self.cmds[self.active] = "stop"
                 self._set("busy")
@@ -251,6 +255,7 @@ class Remote:
                 "state": self.state,
                 "agent": self._best() is not None or self.state != "idle",
                 "mic": self.active if self.state != "idle" else self._best(),
+                "mode": self.mode,
                 "flash": kind if now - at < 1.2 else "",
             }
 
@@ -260,6 +265,8 @@ def log(msg: str) -> None:
 
 
 def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: bool, trusted: set[str]):
+    last = {"typed": 0}  # length of the last dictation, for the "delete that" command
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -317,8 +324,9 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 return self.reply(404, {"error": "not found"})
             if not self.authorized():
                 return self.reply(401, {"error": "bad token"})
+            query = parse_qs(urlsplit(self.path).query)
             if path == "/record/toggle":
-                err = remote.toggle()
+                err = remote.toggle("command" if query.get("mode") == ["command"] else "chat")
                 return self.reply(503 if err else 200, {"error": err} if err else remote.snapshot())
             if path == "/agent/error":
                 log(f"agent error: {self.rfile.read(int(self.headers.get('Content-Length') or 0))[:300]!r}")
@@ -343,20 +351,45 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 return self.reply(413, {"error": "empty or too large"})
             audio = self.rfile.read(length)
             language = self.headers.get("X-Language") or None
+            query = parse_qs(urlsplit(self.path).query)
+            mode = (query.get("mode") or [self.headers.get("X-Mode") or ""])[0]
+            if not mode and self.headers.get("X-Agent"):
+                mode = remote.mode
+            command = mode == "command"
             t = time.time()
             try:
-                text, lang = transcribe(audio, language)
+                if command:
+                    text, lang = transcribe(audio, "en", commands.PROMPT)  # commands are English
+                else:
+                    text, lang = transcribe(audio, language)
             except Exception as e:  # bad audio, CUDA hiccup...
                 log(f"transcribe failed: {e}")
                 self.finished(False)
                 return self.reply(500, {"error": str(e)})
-            log(f"[{lang}] {time.time() - t:.2f}s: {text!r}")
+            log(f"[{lang}]{' command' if command else ''} {time.time() - t:.2f}s: {text!r}")
+            if command:
+                if not text:
+                    self.finished(False)
+                    return self.reply(200, {"text": "", "command": None})
+                try:
+                    dry = not do_type or self.headers.get("X-Type") == "0"
+                    name = commands.run(text, last["typed"], dry=dry)
+                except (LookupError, OSError, subprocess.SubprocessError) as e:
+                    log(f"  command failed: {e}")
+                    self.finished(False)
+                    return self.reply(200, {"text": text, "command": None, "error": str(e)})
+                log(f"  → {name}")
+                if name == "delete that":
+                    last["typed"] = 0
+                self.finished(True)
+                return self.reply(200, {"text": text, "command": name})
             typed = False
             if text and do_type and self.headers.get("X-Type", "1") != "0":
                 try:
                     # Trailing space so consecutive dictations don't glue together.
                     type_text(text + " ")
                     typed = True
+                    last["typed"] = len(text) + 1
                 except (OSError, subprocess.SubprocessError) as e:
                     log(f"wtype failed: {e}")
                     self.finished(False)
