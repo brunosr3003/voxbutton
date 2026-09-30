@@ -116,10 +116,11 @@ final class App: NSObject, NSApplicationDelegate {
         }
         panel = Panel(contentRect: NSRect(origin: origin, size: NSSize(width: size, height: size)),
                       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        // isFloatingPanel resets the level to .floating, so it has to come first.
+        panel.isFloatingPanel = true
         // Above everything, including fullscreen apps like Moonlight, on every Space.
         panel.level = .screenSaver
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
         panel.backgroundColor = .clear
         panel.isOpaque = false

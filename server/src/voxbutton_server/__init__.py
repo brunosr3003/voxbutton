@@ -126,6 +126,7 @@ def make_handler(transcribe: Transcriber, token: str, do_type: bool, trusted: se
                 return self.reply(401, {"error": "bad token"})
             length = int(self.headers.get("Content-Length") or 0)
             if not 0 < length <= MAX_BODY:
+                log(f"rejected body: length={length} type={self.headers.get('Content-Type')}")
                 return self.reply(413, {"error": "empty or too large"})
             audio = self.rfile.read(length)
             language = self.headers.get("X-Language") or None
