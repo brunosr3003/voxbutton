@@ -10,6 +10,9 @@ struct Config: Codable {
     var server: String
     var token: String
     var language: String?
+    /// Show the floating button on the Mac. Off by default: the button lives on
+    /// the PC and this app only lends it the microphone.
+    var button: Bool?
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/voxbutton/config.json")
@@ -130,7 +133,9 @@ final class App: NSObject, NSApplicationDelegate {
         view.onClick = { [weak self] in self?.toggle() }
         view.onMenu = { [weak self] e in self?.showMenu(e) }
         panel.contentView = view
-        panel.orderFrontRegardless()
+        if Config.load()?.button == true {
+            panel.orderFrontRegardless()
+        }
 
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
         if Config.load() == nil {
@@ -138,6 +143,46 @@ final class App: NSObject, NSApplicationDelegate {
             alert("No config found",
                   "Create \(Config.url.path) with:\n{\"server\": \"http://<pc-ip>:8765\", \"token\": \"…\"}")
         }
+        pollAgent()
+    }
+
+    /// Long-polls the server for "start"/"stop" from the button on the PC.
+    func pollAgent() {
+        guard let cfg = Config.load(), let url = URL(string: cfg.server)?.appendingPathComponent("agent/wait") else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.pollAgent() }
+            return
+        }
+        var req = URLRequest(url: url, timeoutInterval: 40)
+        req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+            let ok = err == nil && (resp as? HTTPURLResponse)?.statusCode == 200
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let cmd = json?["cmd"] as? String
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch cmd {
+                case "start" where self.recorder == nil:
+                    if !self.start() { self.reportAgentError("can't record: check microphone permission") }
+                case "stop" where self.recorder != nil:
+                    self.stopAndSend()
+                case "start", "stop":
+                    self.reportAgentError("got \(cmd!) while \(self.recorder == nil ? "idle" : "recording")")
+                default:
+                    break
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + (ok ? 0 : 3)) { self.pollAgent() }
+            }
+        }.resume()
+    }
+
+    func reportAgentError(_ msg: String) {
+        guard let cfg = Config.load(), let url = URL(string: cfg.server)?.appendingPathComponent("agent/error") else {
+            return
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.uploadTask(with: req, from: Data(msg.utf8)).resume()
     }
 
     func toggle() {
@@ -148,7 +193,8 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    func start() {
+    @discardableResult
+    func start() -> Bool {
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: 16000,
@@ -170,9 +216,13 @@ final class App: NSObject, NSApplicationDelegate {
                 let db = r.averagePower(forChannel: 0)  // -160...0
                 self.view.level = CGFloat(max(0, min(1, (db + 50) / 50)))
             }
+            return true
         } catch {
             flash(.error)
-            alert("Can't record", "Check microphone permission in System Settings → Privacy & Security.")
+            if Config.load()?.button == true {
+                alert("Can't record", "Check microphone permission in System Settings → Privacy & Security.")
+            }
+            return false
         }
     }
 
@@ -184,6 +234,7 @@ final class App: NSObject, NSApplicationDelegate {
         guard let cfg = Config.load(), let url = URL(string: cfg.server)?.appendingPathComponent("transcribe"),
               let audio = try? Data(contentsOf: file) else {
             flash(.error)
+            reportAgentError("couldn't read the recording")
             return
         }
         view.state = .busy
@@ -191,6 +242,7 @@ final class App: NSObject, NSApplicationDelegate {
         req.httpMethod = "POST"
         req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
         req.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        req.setValue("1", forHTTPHeaderField: "X-Agent")
         if let lang = cfg.language { req.setValue(lang, forHTTPHeaderField: "X-Language") }
         URLSession.shared.uploadTask(with: req, from: audio) { [weak self] data, resp, err in
             let ok = (resp as? HTTPURLResponse)?.statusCode == 200

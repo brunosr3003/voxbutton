@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Floating microphone button for Hyprland.
+
+Click to start recording, click again to transcribe. The recording itself
+happens wherever the mic agent runs (the Mac app), the text is typed here by
+the voxbutton server. The window never takes keyboard focus, so the text lands
+in whatever window you were typing in.
+
+Usage: voxbutton-button.py [--server http://host:8765] [--x EXPR] [--y EXPR]
+"""
+
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import GLib, Gtk  # noqa: E402
+
+APP_ID = "voxbutton"
+SIZE = 64
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
+
+COLORS = {
+    "offline": (0.35, 0.35, 0.38, 0.55),
+    "idle": (0.13, 0.13, 0.15, 0.88),
+    "recording": (0.90, 0.20, 0.20, 1.0),
+    "busy": (0.95, 0.60, 0.10, 1.0),
+    "done": (0.20, 0.75, 0.35, 1.0),
+    "error": (0.60, 0.30, 0.85, 1.0),
+}
+
+
+def default_server() -> str:
+    try:
+        ip = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5).stdout.split()
+    except (OSError, subprocess.TimeoutExpired):
+        ip = []
+    return f"http://{ip[0] if ip else '127.0.0.1'}:8765"
+
+
+def add_window_rule(x: str, y: str) -> None:
+    """Float, pin to every workspace and never take focus. Added at runtime so
+    the Hyprland config doesn't have to be touched (saving it reloads it)."""
+    lua = (
+        'hl.window_rule({ match = { class = "^(%s)$" }, float = true, pin = true, no_focus = true, '
+        "decorate = false, border_size = 0, no_shadow = true, no_blur = true, no_anim = true, "
+        'size = { %d, %d }, move = { "%s", "%s" } })' % (APP_ID, SIZE, SIZE, x, y)
+    )
+    try:
+        subprocess.run(["hyprctl", "eval", lua], capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        print("hyprctl not available; the window will be a normal one", file=sys.stderr)
+
+
+class Client:
+    def __init__(self, server: str, token: str):
+        self.server = server.rstrip("/")
+        self.token = token
+
+    def call(self, method: str, path: str, timeout: float = 5) -> dict:
+        req = urllib.request.Request(self.server + path, method=method, data=b"" if method == "POST" else None)
+        req.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                return json.load(e)
+            except ValueError:
+                return {"error": f"HTTP {e.code}"}
+        except (OSError, ValueError) as e:
+            return {"error": str(e)}
+
+
+class Button(Gtk.ApplicationWindow):
+    def __init__(self, app: Gtk.Application, client: Client):
+        super().__init__(application=app, title="voxbutton")
+        self.client = client
+        self.state = "offline"
+        self.flash_until = 0.0
+        self.flash_kind = ""
+        self.set_decorated(False)
+        self.set_default_size(SIZE, SIZE)
+        self.set_resizable(False)
+
+        css = Gtk.CssProvider()
+        css.load_from_string("window, window.background { background: transparent; }")
+        Gtk.StyleContext.add_provider_for_display(self.get_display(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.area = Gtk.DrawingArea()
+        self.area.set_content_width(SIZE)
+        self.area.set_content_height(SIZE)
+        self.area.set_draw_func(self.draw)
+        self.set_child(self.area)
+
+        click = Gtk.GestureClick()
+        click.connect("released", self.on_click)
+        self.area.add_controller(click)
+
+        threading.Thread(target=self.poll_loop, daemon=True).start()
+        GLib.timeout_add(50, self.tick)
+
+    # --- network (background threads) ---
+
+    def poll_loop(self) -> None:
+        while True:
+            s = self.client.call("GET", "/state")
+            GLib.idle_add(self.apply_state, s)
+            time.sleep(0.25)
+
+    def on_click(self, *_):
+        if self.state == "busy":
+            return
+
+        def go():
+            r = self.client.call("POST", "/record/toggle")
+            GLib.idle_add(self.apply_state, r)
+
+        threading.Thread(target=go, daemon=True).start()
+
+    # --- UI (main thread) ---
+
+    def apply_state(self, s: dict) -> bool:
+        if "error" in s:
+            print("voxbutton:", s["error"], file=sys.stderr)
+            self.flash("error")
+            if "state" not in s:
+                self.state = "offline" if "agent" not in s else self.state
+        else:
+            self.state = s["state"] if s.get("agent") or s["state"] != "idle" else "offline"
+            if s.get("flash"):
+                self.flash(s["flash"])
+        self.area.queue_draw()
+        return False
+
+    def flash(self, kind: str) -> None:
+        if kind != self.flash_kind or time.time() > self.flash_until:
+            self.flash_kind = kind
+            self.flash_until = time.time() + (2.0 if kind == "error" else 0.8)
+
+    def tick(self) -> bool:
+        if self.state == "recording" or time.time() < self.flash_until:
+            self.area.queue_draw()
+        return True
+
+    def draw(self, _area, cr, w, h):
+        look = self.flash_kind if time.time() < self.flash_until else self.state
+        r, g, b, a = COLORS.get(look, COLORS["idle"])
+        cx, cy, rad = w / 2, h / 2, min(w, h) / 2 - 4
+        if look == "recording":
+            pulse = 0.5 + 0.5 * math.sin(time.time() * 5)
+            cr.set_source_rgba(r, g, b, 0.30)
+            cr.arc(cx, cy, rad + 1 + 2 * pulse, 0, 2 * math.pi)
+            cr.fill()
+        cr.set_source_rgba(r, g, b, a)
+        cr.arc(cx, cy, rad - 2, 0, 2 * math.pi)
+        cr.fill()
+
+        cr.set_source_rgba(1, 1, 1, 0.95 if look != "offline" else 0.6)
+        s = rad / 22
+        if look == "busy":
+            for i in (-1, 0, 1):
+                cr.arc(cx + i * 7 * s, cy, 2.4 * s, 0, 2 * math.pi)
+                cr.fill()
+            return
+        # Microphone: capsule, cradle, stem and base.
+        cw, ch = 8 * s, 14 * s
+        top = cy - 11 * s
+        cr.arc(cx, top + cw / 2, cw / 2, math.pi, 0)
+        cr.arc(cx, top + ch - cw / 2, cw / 2, 0, math.pi)
+        cr.close_path()
+        cr.fill()
+        cr.set_line_width(2.2 * s)
+        cr.arc(cx, top + ch - cw / 2, 7 * s, 0, math.pi)
+        cr.stroke()
+        cr.move_to(cx, top + ch - cw / 2 + 7 * s)
+        cr.line_to(cx, top + ch + 6 * s)
+        cr.move_to(cx - 5 * s, top + ch + 6 * s)
+        cr.line_to(cx + 5 * s, top + ch + 6 * s)
+        cr.stroke()
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--server", default=os.environ.get("VOXBUTTON_SERVER") or default_server())
+    ap.add_argument("--x", default="monitor_w-84", help="Hyprland expression for the x position")
+    ap.add_argument("--y", default="monitor_h*0.45", help="Hyprland expression for the y position")
+    args = ap.parse_args()
+
+    token = (CONFIG_DIR / "token").read_text().strip()
+    add_window_rule(args.x, args.y)
+    GLib.set_prgname(APP_ID)  # becomes the Wayland app_id, i.e. Hyprland's class
+    app = Gtk.Application()
+    app.connect("activate", lambda a: Button(a, Client(args.server, token)).present())
+    app.run([])
+
+
+if __name__ == "__main__":
+    main()

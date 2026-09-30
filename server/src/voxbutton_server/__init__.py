@@ -83,11 +83,81 @@ class Transcriber:
         return text, info.language
 
 
+class Remote:
+    """Lets a button on this machine drive a microphone on another one.
+
+    The mic agent (the Mac app) long-polls /agent/wait for "start"/"stop" and
+    posts the recording to /transcribe like any other client; the button calls
+    /record/toggle and polls /state to show what's happening."""
+
+    AGENT_TIMEOUT = 35  # s without a poll before the agent counts as gone
+    MAX_RECORDING = 300  # s, safety net if the stop never arrives
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.state = "idle"  # idle | recording | busy
+        self.since = time.time()
+        self.cmd: str | None = None
+        self.agent_seen = 0.0
+        self.flash = ("", 0.0)  # ("done" | "error", when)
+
+    def _set(self, state: str) -> None:
+        self.state, self.since = state, time.time()
+
+    def agent_alive(self) -> bool:
+        return time.time() - self.agent_seen < self.AGENT_TIMEOUT
+
+    def wait(self, timeout: float = 25) -> str | None:
+        with self.cond:
+            self.agent_seen = time.time()
+            self.cond.wait_for(lambda: self.cmd is not None, timeout)
+            cmd, self.cmd = self.cmd, None
+            self.agent_seen = time.time()
+            return cmd
+
+    def toggle(self) -> str:
+        with self.cond:
+            if not self.agent_alive():
+                self.flash = ("error", time.time())
+                return "no microphone agent connected"
+            if self.state == "idle":
+                self.cmd = "start"
+                self._set("recording")
+            elif self.state == "recording":
+                self.cmd = "stop"
+                self._set("busy")
+            self.cond.notify_all()
+            return ""
+
+    def finished(self, ok: bool) -> None:
+        with self.cond:
+            if self.state != "idle":
+                self._set("idle")
+            self.flash = ("done" if ok else "error", time.time())
+
+    def snapshot(self) -> dict:
+        with self.cond:
+            now = time.time()
+            if self.state == "recording" and now - self.since > self.MAX_RECORDING:
+                self.cmd = "stop"
+                self._set("busy")
+                self.cond.notify_all()
+            elif self.state == "busy" and now - self.since > 60:
+                self._set("idle")  # the agent never delivered
+                self.flash = ("error", now)
+            kind, at = self.flash
+            return {
+                "state": self.state,
+                "agent": self.agent_alive(),
+                "flash": kind if now - at < 1.2 else "",
+            }
+
+
 def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
-def make_handler(transcribe: Transcriber, token: str, do_type: bool, trusted: set[str]):
+def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: bool, trusted: set[str]):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -114,19 +184,47 @@ def make_handler(transcribe: Transcriber, token: str, do_type: bool, trusted: se
             return secrets.compare_digest(got.encode(), token.encode())
 
         def do_GET(self):
-            if urlsplit(self.path).path == "/health":
-                self.reply(200, {"ok": True})
+            path = urlsplit(self.path).path
+            if path == "/health":
+                return self.reply(200, {"ok": True})
+            if not self.authorized():
+                return self.reply(401, {"error": "bad token"})
+            if path == "/state":
+                self.reply(200, remote.snapshot())
+            elif path == "/agent/wait":
+                self.reply(200, {"cmd": remote.wait()})
             else:
                 self.reply(404, {"error": "not found"})
 
         def do_POST(self):
-            if urlsplit(self.path).path != "/transcribe":
+            path = urlsplit(self.path).path
+            if path not in ("/transcribe", "/record/toggle", "/agent/error"):
                 return self.reply(404, {"error": "not found"})
             if not self.authorized():
                 return self.reply(401, {"error": "bad token"})
+            if path == "/record/toggle":
+                err = remote.toggle()
+                return self.reply(503 if err else 200, {"error": err} if err else remote.snapshot())
+            if path == "/agent/error":
+                log(f"agent error: {self.rfile.read(int(self.headers.get('Content-Length') or 0))[:300]!r}")
+                remote.finished(False)
+                return self.reply(200, {"ok": True})
+            try:
+                self.transcribe()
+            except Exception:
+                self.finished(False)
+                raise
+
+        def finished(self, ok: bool) -> None:
+            # Only the mic agent's uploads belong to the button's recording.
+            if self.headers.get("X-Agent"):
+                remote.finished(ok)
+
+        def transcribe(self):
             length = int(self.headers.get("Content-Length") or 0)
             if not 0 < length <= MAX_BODY:
                 log(f"rejected body: length={length} type={self.headers.get('Content-Type')}")
+                self.finished(False)
                 return self.reply(413, {"error": "empty or too large"})
             audio = self.rfile.read(length)
             language = self.headers.get("X-Language") or None
@@ -135,6 +233,7 @@ def make_handler(transcribe: Transcriber, token: str, do_type: bool, trusted: se
                 text, lang = transcribe(audio, language)
             except Exception as e:  # bad audio, CUDA hiccup...
                 log(f"transcribe failed: {e}")
+                self.finished(False)
                 return self.reply(500, {"error": str(e)})
             log(f"[{lang}] {time.time() - t:.2f}s: {text!r}")
             typed = False
@@ -145,7 +244,9 @@ def make_handler(transcribe: Transcriber, token: str, do_type: bool, trusted: se
                     typed = True
                 except (OSError, subprocess.SubprocessError) as e:
                     log(f"wtype failed: {e}")
+                    self.finished(False)
                     return self.reply(500, {"error": f"wtype failed: {e}", "text": text})
+            self.finished(bool(text))
             self.reply(200, {"text": text, "language": lang, "typed": typed})
 
     return Handler
@@ -176,7 +277,7 @@ def main() -> None:
 
     host = args.host or tailscale_ip() or "127.0.0.1"
     transcriber = Transcriber(args.model, args.device, args.compute_type, args.language, args.prompt)
-    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, token, not args.no_type, set(args.trust)))
+    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, Remote(), token, not args.no_type, set(args.trust)))
     log(f"listening on http://{host}:{args.port} (token in {TOKEN_FILE})")
     try:
         server.serve_forever()
