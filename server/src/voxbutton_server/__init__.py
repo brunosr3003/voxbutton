@@ -220,11 +220,14 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
 
         def reply(self, code: int, body: dict) -> None:
             data = json.dumps(body).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # e.g. an agent's long-poll cancelled on its side
 
         def authorized(self) -> bool:
             if self.client_address[0] in trusted:
