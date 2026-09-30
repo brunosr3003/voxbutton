@@ -4,14 +4,14 @@ A floating microphone button for voice coding. Click it, talk, click again. Your
 speech is transcribed by Whisper running locally on your own GPU and typed into
 whatever window has focus, such as a terminal running Claude Code or your editor.
 
-It's built for a setup where you drive a Linux box remotely (for example from a
+It's built for a setup where you drive a Linux or Windows PC remotely (for example from a
 Mac through Moonlight/Sunshine, which doesn't forward the microphone). The button
-lives on the Linux desktop, and the Mac lends it its microphone:
+lives on the PC's desktop, and the Mac (or an iPhone) lends it its microphone:
 
 ```
- Linux PC (GPU)                                       Mac
+ PC with a GPU (Linux or Windows)                    Mac
 ┌───────────────────────────────┐    Tailscale   ┌──────────────────────┐
-│ voxbutton-button (GTK)        │                │ VoxButton.app        │
+│ voxbutton button (GTK or Tk)  │                │ VoxButton.app        │
 │   click → /record/toggle      │                │ (no window; agent)   │
 │ voxbutton-server              │ ── start ────▶ │ records the Mac mic  │
 │   faster-whisper on the GPU   │ ◀── audio ──── │                      │
@@ -27,50 +27,74 @@ lives on the Linux desktop, and the Mac lends it its microphone:
 - Silence is skipped instead of being handed to Whisper, which likes to
   hallucinate on it.
 
-## Linux server
+## Server (Linux or Windows)
 
-Requirements: an NVIDIA GPU, [uv](https://docs.astral.sh/uv/), `wtype`, and a
-Wayland compositor that supports the virtual keyboard protocol (Hyprland, Sway…).
+Runs on the machine you type on. It needs [uv](https://docs.astral.sh/uv/) and,
+for speed, an NVIDIA GPU (CUDA libraries come from pip wheels, so you don't need
+a CUDA toolkit; without a GPU it falls back to the CPU, where a smaller model
+such as `small` is the better pick). On first start it downloads the Whisper
+model (~1.6 GB) and creates the auth token.
 
-```sh
-sudo pacman -S wtype          # or your distro's equivalent
-cd server
-./run.sh                      # logs to ~/.local/state/voxbutton.log
-uv run voxbutton-server --print-token
-```
+| desktop | types with | start |
+|---|---|---|
+| Hyprland / Wayland | `wtype` (`sudo pacman -S wtype`) | `server/run.sh` from the compositor's autostart |
+| X11 (GNOME/KDE on Xorg, i3…) | `xdotool` | `linux/start-x11.sh` (server + button) |
+| Windows 10/11 | built-in (SendInput) | `windows\start.bat`; `windows\install-startup.bat` makes it start with Windows |
 
-On first start it downloads the Whisper model (~1.6 GB). CUDA libraries come
-from pip wheels, so you don't need a system CUDA toolkit. By default the server
-binds to the machine's Tailscale IPv4 on port 8765 and requires the token
-(generated in `~/.config/voxbutton/token`).
-
-Start it from your compositor's autostart so `wtype` can reach the Wayland
-session. For Hyprland:
+For Hyprland:
 
 ```lua
 hl.exec_cmd("/path/to/voxbutton/server/run.sh")   -- hyprland.lua
-```
-```ini
-exec-once = /path/to/voxbutton/server/run.sh     # hyprland.conf
+hl.exec_cmd("/path/to/voxbutton/linux/voxbutton-button.py")
 ```
 
-Useful options (`uv run voxbutton-server --help`):
+### Configuration
 
-| flag | default | |
+Everything lives in one folder: `~/.config/voxbutton/` on Linux,
+`%APPDATA%\voxbutton\` on Windows.
+
+| file | |
+|---|---|
+| `server.json` | server settings (below); the settings window writes here |
+| `token` | the auth token, created on first start |
+| `button.json` | where you left the Windows/X11 button |
+
+`server.json` keys, all optional:
+
+| key | default | |
 |---|---|---|
-| `--model` | `large-v3-turbo` | any faster-whisper model (`small`, `medium`, `large-v3`…) |
-| `--language` | auto | force a language, e.g. `en` or `pt` |
-| `--languages` | any | languages auto-detection may pick, e.g. `en,pt` |
-| `--min-level` | `-34` | clips quieter than this (dBFS, loudest 100 ms) count as silence |
-| `--prompt` | none | bias the vocabulary: project names, jargon |
-| `--host` / `--port` | Tailscale IP / 8765 | |
-| `--public-url` | none | HTTPS address shown in settings for devices outside the tailnet |
-| `--no-type` | | only return the text |
-| `--trust IP` | | accept this IP without a token (repeatable) |
+| `model` | `large-v3-turbo` | any faster-whisper model (`small`, `medium`, `large-v3`…) |
+| `device` | `auto` | `cuda`, `cpu` or `auto` |
+| `language` | `""` | force one dictation language, e.g. `en`; empty auto-detects |
+| `languages` | `[]` | languages auto-detection may pick, e.g. `["en", "pt"]` |
+| `min_level` | `-34` | clips quieter than this (dBFS, loudest 100 ms) count as silence |
+| `prompt` | `""` | biases the vocabulary: project names, jargon |
+| `host` / `port` | Tailscale IP / `8765` | where to listen |
+| `trust` | `[]` | IPs accepted without the token, e.g. a phone's Tailscale address |
+| `public_url` | `""` | HTTPS address shown in settings for devices outside the tailnet |
+| `type` | `true` | `false` only returns the text |
 
-## Linux button
+For example:
 
-Needs Python with GTK 4 bindings (`python-gobject`) and Hyprland. The script
+```json
+{
+  "languages": ["en", "pt"],
+  "trust": ["100.64.0.6"],
+  "public_url": "https://voice.example.com"
+}
+```
+
+Command-line flags (`uv run voxbutton-server --help`) override the file for one
+run; `--config` prints the settings in use, `--print-token` the token.
+
+## The button
+
+On **Windows** and **X11** it's `desktop/voxbutton_tk.py` (Tk, ships with
+Python; the start scripts above launch it). It never takes keyboard focus, you
+drag it wherever you want, and it remembers the spot.
+
+On **Hyprland** it's `linux/voxbutton-button.py`. It needs Python with GTK 4
+bindings (`python-gobject`). The script
 registers its own window rules at runtime (float, pin, no focus on open or on
 hover), so the Hyprland config isn't touched. It can't use Hyprland's `no_focus`,
 because windows with that rule receive no clicks.

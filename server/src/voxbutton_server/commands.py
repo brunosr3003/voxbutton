@@ -6,15 +6,18 @@ number words as digits).
 Key combos depend on the focused app, e.g. copying is ctrl+shift+c in a
 terminal and ctrl+c elsewhere."""
 
-import json
 import re
-import subprocess
 import unicodedata
 from dataclasses import dataclass
 from typing import Callable
 
-TERMINALS = {"kitty", "alacritty", "foot", "org.wezfurlong.wezterm", "com.mitchellh.ghostty", "konsole"}
-BROWSERS = {"firefox", "zen", "chromium", "google-chrome", "brave-browser", "vivaldi-stable"}
+from voxbutton_server import platform
+from voxbutton_server.platform import key, type_text
+
+TERMINALS = {"kitty", "alacritty", "foot", "org.wezfurlong.wezterm", "com.mitchellh.ghostty", "konsole",
+             "gnome-terminal-server", "xterm", "windowsterminal", "wezterm-gui", "alacritty.exe"}
+BROWSERS = {"firefox", "zen", "chromium", "google-chrome", "chrome", "brave-browser", "brave", "msedge",
+            "vivaldi-stable", "vivaldi"}
 
 NUMBERS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
@@ -35,31 +38,6 @@ def normalize(text: str) -> str:
     text = re.sub(r"[^a-z0-9 ]+", " ", text)
     words = [str(NUMBERS[w]) if w in NUMBERS else w for w in text.split()]
     return " ".join(words)
-
-
-def active_class() -> str:
-    try:
-        out = subprocess.run(["hyprctl", "activewindow", "-j"], capture_output=True, text=True, timeout=3)
-        return (json.loads(out.stdout or "{}").get("class") or "").lower()
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return ""
-
-
-def key(combo: str, times: int = 1) -> None:
-    """Press a combo like "ctrl+shift+Tab" with wtype."""
-    *mods, k = combo.split("+")
-    args = []
-    for _ in range(times):
-        args += [a for m in mods for a in ("-M", m)] + ["-k", k] + [a for m in reversed(mods) for a in ("-m", m)]
-    subprocess.run(["wtype", *args], check=True, timeout=10)
-
-
-def type_text(text: str) -> None:
-    subprocess.run(["wtype", "--", text], check=True, timeout=30)
-
-
-def hypr(lua: str) -> None:
-    subprocess.run(["hyprctl", "dispatch", lua], check=True, capture_output=True, timeout=5)
 
 
 @dataclass
@@ -108,9 +86,12 @@ def _(m, c):
 
 @command("go to tab", rf"(?:go to |switch to )?{TAB} (?:number )?(\d)", say=['tab 3', 'go to tab 3'], does='Jump to tab N (alt+N, browsers)')
 def _(m, c):
-    if c.terminal:
-        raise LookupError("tab by number isn't available in the terminal")
-    key(f"alt+{m.group(1)}")
+    if c.app == "windowsterminal":
+        key(f"ctrl+alt+{m.group(1)}")
+    elif c.terminal:
+        raise LookupError("tab by number isn't available in this terminal")
+    else:
+        key(f"alt+{m.group(1)}")
 
 
 @command("new tab", rf"(?:new|open(?: a)?(?: new)?) {TAB}", say=['new tab'], does='Open a tab (ctrl+shift+t in terminals, ctrl+t elsewhere)')
@@ -123,15 +104,15 @@ def _(m, c):
     key("ctrl+shift+q" if c.terminal else "ctrl+w")
 
 
-@command("workspace", r"(?:go to |switch to )?(?:workspace|desktop|screen) (\d+)", say=['workspace 2', 'go to workspace 2'], does='Switch Hyprland workspace')
+@command("workspace", r"(?:go to |switch to )?(?:workspace|desktop|screen) (\d+)", say=['workspace 2', 'go to workspace 2'], does='Switch workspace (Hyprland, X11)')
 def _(m, c):
-    hypr(f'hl.dsp.focus({{ workspace = "{m.group(1)}" }})')
+    platform.focus_workspace(int(m.group(1)))
 
 
-@command("focus window", rf"(?:focus )?window(?: on the| to the)? {SIDE}", rf"focus(?: the)? {SIDE}(?: window)?", say=['window left', 'focus right'], does='Move focus to the window on that side')
+@command("focus window", rf"(?:focus )?window(?: on the| to the)? {SIDE}", rf"focus(?: the)? {SIDE}(?: window)?", say=['window left', 'focus right'], does='Move focus to the window on that side (Hyprland)')
 def _(m, c):
     d = next(g for g in m.groups() if g)
-    hypr(f'hl.dsp.focus({{ direction = "{DIR[d]}" }})')
+    platform.focus_direction(DIR[d])
 
 
 @command("enter", r"enter", r"send(?: it)?", r"submit", r"confirm", r"ok", r"okay", r"return", say=['send', 'enter', 'submit'], does='Press Enter')
@@ -244,7 +225,7 @@ def run(text: str, last_typed: int = 0, dry: bool = False) -> str:
     times = 1
     if m := REPEAT.match(t):
         t, times = m.group(1), min(int(m.group(2)), 20)
-    ctx = Ctx(app=active_class(), times=times, last_typed=last_typed)
+    ctx = Ctx(app=platform.active_app(), times=times, last_typed=last_typed)
     for name, pat, fn in COMMANDS:
         if m := pat.match(t):
             if not dry:

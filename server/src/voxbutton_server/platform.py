@@ -1,0 +1,186 @@
+"""Typing, key presses and window info for the desktop the server runs on.
+
+    wayland  wtype (virtual keyboard protocol); Hyprland extras via hyprctl
+    x11      xdotool
+    windows  SendInput through ctypes, no extra installs
+
+Key combos use X keysym-style names everywhere ("ctrl+shift+Tab", "Return",
+"Page_Up", "BackSpace", "F5", "a"); the Windows backend maps them to virtual
+keys."""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+
+def detect() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return "wayland"
+    return "x11"
+
+
+KIND = detect()
+HYPRLAND = bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+
+
+def missing_tool() -> str | None:
+    """Name of the typing tool this desktop needs but lacks, if any."""
+    tool = {"wayland": "wtype", "x11": "xdotool"}.get(KIND)
+    return tool if tool and not shutil.which(tool) else None
+
+
+class Unsupported(LookupError):
+    pass
+
+
+# --- Linux -------------------------------------------------------------------
+
+
+def _run(*args: str, timeout: float = 30) -> str:
+    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout).stdout
+
+
+def _hypr(lua: str) -> None:
+    if not HYPRLAND:
+        raise Unsupported("only available on Hyprland")
+    _run("hyprctl", "dispatch", lua, timeout=5)
+
+
+# --- Windows -----------------------------------------------------------------
+
+if KIND == "windows":
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    INPUT_KEYBOARD, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, KEYEVENTF_EXTENDEDKEY = 1, 0x2, 0x4, 0x1
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+    class MOUSEINPUT(ctypes.Structure):  # only here so the union has the right size
+        _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+    class _U(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+    VK = {
+        "ctrl": 0x11, "shift": 0x10, "alt": 0x12, "super": 0x5B, "logo": 0x5B,
+        "Return": 0x0D, "Tab": 0x09, "Escape": 0x1B, "BackSpace": 0x08, "Delete": 0x2E, "space": 0x20,
+        "Page_Up": 0x21, "Page_Down": 0x22, "End": 0x23, "Home": 0x24,
+        "Left": 0x25, "Up": 0x26, "Right": 0x27, "Down": 0x28,
+        **{f"F{i}": 0x6F + i for i in range(1, 13)},
+    }
+    EXTENDED = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2E}
+
+    def _vk(name: str) -> int:
+        if name in VK:
+            return VK[name]
+        if len(name) == 1 and name.isalnum():
+            return ord(name.upper())
+        raise Unsupported(f"no Windows key for {name!r}")
+
+    def _send(events: list[INPUT]) -> None:
+        arr = (INPUT * len(events))(*events)
+        if user32.SendInput(len(events), arr, ctypes.sizeof(INPUT)) != len(events):
+            raise OSError(ctypes.get_last_error(), "SendInput was blocked")
+
+    def _key_event(vk: int, up: bool) -> INPUT:
+        flags = (KEYEVENTF_KEYUP if up else 0) | (KEYEVENTF_EXTENDEDKEY if vk in EXTENDED else 0)
+        return INPUT(type=INPUT_KEYBOARD, u=_U(ki=KEYBDINPUT(wVk=vk, dwFlags=flags)))
+
+    def _unicode_events(text: str) -> list[INPUT]:
+        out = []
+        data = text.replace("\n", "\r").encode("utf-16-le")
+        for i in range(0, len(data), 2):
+            unit = int.from_bytes(data[i:i + 2], "little")  # surrogate pairs go as two units
+            for up in (False, True):
+                out.append(INPUT(type=INPUT_KEYBOARD, u=_U(ki=KEYBDINPUT(
+                    wScan=unit, dwFlags=KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if up else 0)))))
+        return out
+
+    def _foreground_exe() -> str:
+        hwnd = user32.GetForegroundWindow()
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        h = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            if not kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                return ""
+            return os.path.splitext(os.path.basename(buf.value))[0]
+        finally:
+            kernel32.CloseHandle(h)
+
+
+# --- the interface ------------------------------------------------------------
+
+
+def type_text(text: str) -> None:
+    if KIND == "windows":
+        _send(_unicode_events(text))
+    elif KIND == "wayland":
+        _run("wtype", "--", text)
+    else:
+        _run("xdotool", "type", "--clearmodifiers", "--delay", "4", "--", text)
+
+
+def key(combo: str, times: int = 1) -> None:
+    """Press a combo like "ctrl+shift+Tab", `times` times."""
+    *mods, k = combo.split("+")
+    if KIND == "windows":
+        vks = [_vk(m) for m in mods] + [_vk(k)]
+        once = [_key_event(v, False) for v in vks] + [_key_event(v, True) for v in reversed(vks)]
+        _send(once * times)
+    elif KIND == "wayland":
+        args = []
+        for _ in range(times):
+            args += [a for m in mods for a in ("-M", m)] + ["-k", k] + [a for m in reversed(mods) for a in ("-m", m)]
+        _run("wtype", *args)
+    else:
+        _run("xdotool", "key", "--clearmodifiers", "--repeat", str(times), combo)
+
+
+def active_app() -> str:
+    """Lowercased class / program name of the focused window."""
+    try:
+        if KIND == "windows":
+            return _foreground_exe().lower()
+        if HYPRLAND:
+            return (json.loads(_run("hyprctl", "activewindow", "-j", timeout=3) or "{}").get("class") or "").lower()
+        if KIND == "x11" and shutil.which("xdotool"):
+            return _run("xdotool", "getactivewindow", "getwindowclassname", timeout=3).strip().lower()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return ""
+
+
+def focus_workspace(n: int) -> None:
+    if HYPRLAND:
+        _hypr(f'hl.dsp.focus({{ workspace = "{n}" }})')
+    elif KIND == "x11":
+        _run("xdotool", "set_desktop", str(n - 1))
+    else:
+        raise Unsupported("workspaces by number aren't available on this desktop")
+
+
+def focus_direction(d: str) -> None:
+    """d is one of l, r, u, d."""
+    if HYPRLAND:
+        _hypr(f'hl.dsp.focus({{ direction = "{d}" }})')
+    else:
+        raise Unsupported("moving focus by direction is only available on Hyprland")

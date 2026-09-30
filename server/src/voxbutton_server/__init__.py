@@ -1,5 +1,8 @@
 """voxbutton server: receives audio over HTTP, transcribes it with Whisper on
-the local GPU and types the text into the focused Wayland window."""
+the local GPU and types the text into the focused window (Linux or Windows).
+
+Settings come from server.json in the config directory, then command-line
+flags; the settings window writes back to server.json."""
 
 import argparse
 import glob
@@ -16,18 +19,67 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from voxbutton_server import commands
+from voxbutton_server import commands, platform
 
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
+if sys.platform == "win32":
+    CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "voxbutton"
+else:
+    CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
 TOKEN_FILE = CONFIG_DIR / "token"
-SETTINGS_FILE = CONFIG_DIR / "settings.json"  # what the settings window saved; wins over flags
+CONFIG_FILE = CONFIG_DIR / "server.json"
+LEGACY_SETTINGS = CONFIG_DIR / "settings.json"
+
+DEFAULTS = {
+    "host": "",  # empty: this machine's Tailscale IPv4, else 127.0.0.1
+    "port": 8765,
+    "model": "large-v3-turbo",
+    "device": "auto",  # cuda when there's an NVIDIA GPU, else cpu
+    "compute_type": "default",
+    "language": "",  # force one language for dictation; empty: auto-detect
+    "languages": [],  # languages auto-detection may pick from, e.g. ["en", "pt"]
+    "min_level": -34.0,  # dBFS; quieter clips count as silence
+    "prompt": "",  # biases Whisper's vocabulary (names, jargon)
+    "trust": [],  # IPs allowed without the token, e.g. a phone's Tailscale address
+    "public_url": "",  # HTTPS address for devices outside the tailnet, shown in settings
+    "type": True,  # type the text; false only returns it
+}
+
+
+def load_config() -> dict:
+    cfg = dict(DEFAULTS)
+    for f in (CONFIG_FILE, LEGACY_SETTINGS):
+        if f.exists():
+            try:
+                cfg.update({k: v for k, v in json.loads(f.read_text()).items() if k in DEFAULTS})
+            except (ValueError, AttributeError) as e:
+                print(f"ignoring {f}: {e}", file=sys.stderr)
+    return cfg
+
+
+def save_config(changes: dict) -> None:
+    saved = {}
+    if CONFIG_FILE.exists():
+        try:
+            saved = json.loads(CONFIG_FILE.read_text())
+        except ValueError:
+            pass
+    saved.update(changes)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(saved, indent=2) + "\n")
+    LEGACY_SETTINGS.unlink(missing_ok=True)  # folded into server.json
 MAX_BODY = 50 * 1024 * 1024  # ~25 min of 16 kHz mono WAV
 
 
 def ensure_cuda_libs() -> None:
-    """cuBLAS/cuDNN come from pip wheels; ctranslate2 only finds them through
+    """cuBLAS/cuDNN come from pip wheels. On Windows their DLL folders are added
+    to the search path; on Linux ctranslate2 only finds them through
     LD_LIBRARY_PATH, which has to be set before the process starts."""
-    if os.environ.get("VOXBUTTON_REEXEC"):
+    if sys.platform == "win32":
+        for d in glob.glob(str(Path(sys.prefix) / "Lib/site-packages/nvidia/*/bin")):
+            os.add_dll_directory(d)
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+        return
+    if sys.platform != "linux" or os.environ.get("VOXBUTTON_REEXEC"):
         return
     base = Path(sys.prefix) / "lib"
     dirs = sorted(glob.glob(str(base / "python3*/site-packages/nvidia/*/lib")))
@@ -49,17 +101,21 @@ def load_token() -> str:
     return token
 
 
+def tailscale_cli() -> str:
+    win = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tailscale" / "tailscale.exe"
+    return shutil.which("tailscale") or (str(win) if win.exists() else "tailscale")
+
+
 def tailscale_ip() -> str | None:
     try:
-        out = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5)
+        out = subprocess.run([tailscale_cli(), "ip", "-4"], capture_output=True, text=True, timeout=5)
         ip = out.stdout.strip().splitlines()
         return ip[0] if out.returncode == 0 and ip else None
     except (OSError, subprocess.TimeoutExpired):
         return None
 
 
-def type_text(text: str) -> None:
-    subprocess.run(["wtype", "--", text], check=True, timeout=30)
+type_text = platform.type_text
 
 
 class Transcriber:
@@ -138,7 +194,7 @@ class StreamWatcher:
     @staticmethod
     def _snapshot() -> dict[str, int]:
         try:
-            out = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5)
+            out = subprocess.run([tailscale_cli(), "status", "--json"], capture_output=True, text=True, timeout=5)
             peers = json.loads(out.stdout).get("Peer") or {}
         except (OSError, subprocess.TimeoutExpired, ValueError):
             return {}
@@ -375,8 +431,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         transcribe.min_level = float(body["min_level"])
                 except (ValueError, TypeError, AttributeError) as e:
                     return self.reply(400, {"error": str(e)})
-                SETTINGS_FILE.write_text(json.dumps(
-                    {"languages": transcribe.languages, "min_level": transcribe.min_level}, indent=2) + "\n")
+                save_config({"languages": transcribe.languages, "min_level": transcribe.min_level})
                 log(f"settings: languages={transcribe.languages} min_level={transcribe.min_level}")
                 return self.reply(200, {"ok": True})
             if path == "/agent/error":
@@ -454,18 +509,18 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
 def main() -> None:
     ensure_cuda_libs()
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", action="store_true", help=f"print the settings in use (from {CONFIG_FILE}) and exit")
     ap.add_argument("--host", help="bind address (default: this machine's Tailscale IPv4)")
-    ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--model", default="large-v3-turbo")
-    ap.add_argument("--device", default="cuda")
-    ap.add_argument("--compute-type", default="float16")
-    ap.add_argument("--language", help="force a language (e.g. en, pt); default: auto-detect")
-    ap.add_argument("--languages", default="",
-                    help="comma-separated languages auto-detection may pick from (e.g. en,pt)")
-    ap.add_argument("--min-level", type=float, default=-34,
+    ap.add_argument("--port", type=int)
+    ap.add_argument("--model", help=f"faster-whisper model (default {DEFAULTS['model']})")
+    ap.add_argument("--device", help="cuda, cpu or auto")
+    ap.add_argument("--compute-type")
+    ap.add_argument("--language", help="force a language for dictation (e.g. en, pt); default: auto-detect")
+    ap.add_argument("--languages", help="comma-separated languages auto-detection may pick from (e.g. en,pt)")
+    ap.add_argument("--min-level", type=float,
                     help="skip clips whose loudest 100 ms is quieter than this, in dBFS (default -34)")
     ap.add_argument("--prompt", help="initial prompt to bias vocabulary (names, jargon)")
-    ap.add_argument("--trust", action="append", default=[], metavar="IP",
+    ap.add_argument("--trust", action="append", metavar="IP",
                     help="accept requests from this IP without a token (e.g. a Tailscale device); repeatable")
     ap.add_argument("--public-url", help="HTTPS address for devices outside the tailnet (shown in settings)")
     ap.add_argument("--no-type", action="store_true", help="only return the text, don't type it")
@@ -476,23 +531,31 @@ def main() -> None:
     if args.print_token:
         print(token)
         return
-    if not args.no_type and not shutil.which("wtype"):
-        sys.exit("wtype not found: install it (e.g. `sudo pacman -S wtype`) or pass --no-type")
 
-    if SETTINGS_FILE.exists():
-        try:
-            saved = json.loads(SETTINGS_FILE.read_text())
-            args.languages = ",".join(saved.get("languages", args.languages.split(",")))
-            args.min_level = float(saved.get("min_level", args.min_level))
-        except (ValueError, TypeError) as e:
-            log(f"ignoring {SETTINGS_FILE}: {e}")
+    cfg = load_config()
+    for k in ("host", "port", "model", "device", "compute_type", "language", "min_level", "prompt", "public_url"):
+        if getattr(args, k) is not None:
+            cfg[k] = getattr(args, k)
+    if args.languages is not None:
+        cfg["languages"] = [l for l in args.languages.split(",") if l]
+    if args.trust:
+        cfg["trust"] = args.trust
+    if args.no_type:
+        cfg["type"] = False
+    if args.config:
+        print(json.dumps(cfg, indent=2))
+        return
 
-    host = args.host or tailscale_ip() or "127.0.0.1"
-    transcriber = Transcriber(args.model, args.device, args.compute_type, args.language, args.prompt,
-                              [l for l in args.languages.split(",") if l], args.min_level)
-    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, Remote(StreamWatcher()), token, not args.no_type, set(args.trust),
-                                              {"local": f"http://{host}:{args.port}", "public": args.public_url or ""}))
-    log(f"listening on http://{host}:{args.port} (token in {TOKEN_FILE})")
+    if cfg["type"] and (tool := platform.missing_tool()):
+        sys.exit(f"{tool} not found: install it (e.g. `sudo pacman -S {tool}`) or set \"type\": false")
+
+    host = cfg["host"] or tailscale_ip() or "127.0.0.1"
+    transcriber = Transcriber(cfg["model"], cfg["device"], cfg["compute_type"], cfg["language"] or None,
+                              cfg["prompt"] or None, cfg["languages"], float(cfg["min_level"]))
+    handler = make_handler(transcriber, Remote(StreamWatcher()), token, cfg["type"], set(cfg["trust"]),
+                           {"local": f"http://{host}:{cfg['port']}", "public": cfg["public_url"]})
+    server = ThreadingHTTPServer((host, int(cfg["port"])), handler)
+    log(f"listening on http://{host}:{cfg['port']} ({platform.KIND}; config in {CONFIG_DIR})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
