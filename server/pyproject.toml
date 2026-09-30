@@ -1,0 +1,21 @@
+[project]
+name = "voxbutton-server"
+version = "0.1.0"
+description = "Whisper transcription server for voxbutton"
+authors = [
+    { name = "brunosr3003", email = "bruno.soares.reis.3003@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "av<16",
+    "faster-whisper>=1.2.1",
+    "nvidia-cublas-cu12>=12.9.2.10",
+    "nvidia-cudnn-cu12>=9,<10",
+]
+
+[project.scripts]
+voxbutton-server = "voxbutton_server:main"
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
