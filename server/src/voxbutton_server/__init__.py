@@ -119,9 +119,13 @@ class Transcriber:
 class Remote:
     """Lets a button on this machine drive a microphone on another one.
 
-    The mic agent (the Mac app) long-polls /agent/wait for "start"/"stop" and
-    posts the recording to /transcribe like any other client; the button calls
-    /record/toggle and polls /state to show what's happening."""
+    Mic agents (the Mac and iOS apps) long-poll /agent/wait for "start"/"stop"
+    and post the recording to /transcribe like any other client; the button
+    calls /record/toggle and polls /state to show what's happening.
+
+    Each agent says how good a pick it is right now (its priority): the Mac
+    reports 2 while Moonlight is in front and 0 otherwise, the iPhone always 1.
+    A recording goes to the best one, and its stop goes to the same agent."""
 
     AGENT_TIMEOUT = 35  # s without a poll before the agent counts as gone
     MAX_RECORDING = 300  # s, safety net if the stop never arrives
@@ -130,34 +134,48 @@ class Remote:
         self.cond = threading.Condition()
         self.state = "idle"  # idle | recording | busy
         self.since = time.time()
-        self.cmd: str | None = None
-        self.agent_seen = 0.0
+        self.agents: dict[str, dict] = {}  # name -> {"seen", "prio", "gen"}
+        self.cmds: dict[str, str] = {}
+        self.active: str | None = None
         self.flash = ("", 0.0)  # ("done" | "error", when)
 
     def _set(self, state: str) -> None:
         self.state, self.since = state, time.time()
 
-    def agent_alive(self) -> bool:
-        return time.time() - self.agent_seen < self.AGENT_TIMEOUT
+    def _alive(self) -> dict[str, dict]:
+        now = time.time()
+        return {n: a for n, a in self.agents.items() if now - a["seen"] < self.AGENT_TIMEOUT}
 
-    def wait(self, timeout: float = 25) -> str | None:
+    def _best(self) -> str | None:
+        ready = [(a["prio"], a["seen"], n) for n, a in self._alive().items() if a["prio"] > 0]
+        return max(ready)[2] if ready else None
+
+    def wait(self, name: str, prio: int, timeout: float = 25) -> str | None:
         with self.cond:
-            self.agent_seen = time.time()
-            self.cond.wait_for(lambda: self.cmd is not None, timeout)
-            cmd, self.cmd = self.cmd, None
-            self.agent_seen = time.time()
-            return cmd
+            a = self.agents.setdefault(name, {"gen": 0})
+            a["gen"] += 1  # a newer poll from the same agent supersedes this one
+            gen = a["gen"]
+            a["seen"], a["prio"] = time.time(), prio
+            self.cond.notify_all()
+            self.cond.wait_for(lambda: a["gen"] != gen or name in self.cmds, timeout)
+            a["seen"] = time.time()
+            if a["gen"] != gen:
+                return None
+            return self.cmds.pop(name, None)
 
     def toggle(self) -> str:
         with self.cond:
-            if not self.agent_alive():
-                self.flash = ("error", time.time())
-                return "no microphone agent connected"
             if self.state == "idle":
-                self.cmd = "start"
+                best = self._best()
+                if not best:
+                    self.flash = ("error", time.time())
+                    return "no microphone available" if self._alive() else "no microphone agent connected"
+                self.active = best
+                self.cmds[best] = "start"
                 self._set("recording")
-            elif self.state == "recording":
-                self.cmd = "stop"
+                log(f"recording on {best}")
+            elif self.state == "recording" and self.active:
+                self.cmds[self.active] = "stop"
                 self._set("busy")
             self.cond.notify_all()
             return ""
@@ -171,8 +189,8 @@ class Remote:
     def snapshot(self) -> dict:
         with self.cond:
             now = time.time()
-            if self.state == "recording" and now - self.since > self.MAX_RECORDING:
-                self.cmd = "stop"
+            if self.state == "recording" and now - self.since > self.MAX_RECORDING and self.active:
+                self.cmds[self.active] = "stop"
                 self._set("busy")
                 self.cond.notify_all()
             elif self.state == "busy" and now - self.since > 60:
@@ -181,7 +199,8 @@ class Remote:
             kind, at = self.flash
             return {
                 "state": self.state,
-                "agent": self.agent_alive(),
+                "agent": self._best() is not None or self.state != "idle",
+                "mic": self.active if self.state != "idle" else self._best(),
                 "flash": kind if now - at < 1.2 else "",
             }
 
@@ -225,7 +244,13 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
             if path == "/state":
                 self.reply(200, remote.snapshot())
             elif path == "/agent/wait":
-                self.reply(200, {"cmd": remote.wait()})
+                q = parse_qs(urlsplit(self.path).query)
+                name = q.get("name", ["mac"])[0][:32]
+                try:
+                    prio = int(q.get("prio", ["1"])[0])
+                except ValueError:
+                    prio = 1
+                self.reply(200, {"cmd": remote.wait(name, prio)})
             else:
                 self.reply(404, {"error": "not found"})
 

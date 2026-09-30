@@ -111,6 +111,7 @@ final class App: NSObject, NSApplicationDelegate {
     var meter: Timer?
     var resetTimer: Timer?
     let file = FileManager.default.temporaryDirectory.appendingPathComponent("voxbutton.wav")
+    var pollTask: URLSessionDataTask?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         var origin = NSPoint(x: 40, y: 200)
@@ -144,18 +145,35 @@ final class App: NSObject, NSApplicationDelegate {
                   "Create \(Config.url.path) with:\n{\"server\": \"http://<pc-ip>:8765\", \"token\": \"…\"}")
         }
         pollAgent()
+        // Priority depends on the front app, so tell the server right away when it changes.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.recorder == nil else { return }
+            self.pollTask?.cancel()
+        }
+    }
+
+    /// 2 while Moonlight is in front (you're at the Mac driving the PC), else 0,
+    /// so the iPhone gets the recording instead.
+    var priority: Int {
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        return front.lowercased().contains("moonlight") ? 2 : 0
     }
 
     /// Long-polls the server for "start"/"stop" from the button on the PC.
     func pollAgent() {
-        guard let cfg = Config.load(), let url = URL(string: cfg.server)?.appendingPathComponent("agent/wait") else {
+        guard let cfg = Config.load(),
+              var comps = URLComponents(string: cfg.server + "/agent/wait") else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.pollAgent() }
             return
         }
-        var req = URLRequest(url: url, timeoutInterval: 40)
+        comps.queryItems = [.init(name: "name", value: "mac"), .init(name: "prio", value: String(priority))]
+        var req = URLRequest(url: comps.url!, timeoutInterval: 40)
         req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
-            let ok = err == nil && (resp as? HTTPURLResponse)?.statusCode == 200
+        let task = URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+            let cancelled = (err as? URLError)?.code == .cancelled
+            let ok = cancelled || (err == nil && (resp as? HTTPURLResponse)?.statusCode == 200)
             let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             let cmd = json?["cmd"] as? String
             DispatchQueue.main.async {
@@ -172,7 +190,9 @@ final class App: NSObject, NSApplicationDelegate {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + (ok ? 0 : 3)) { self.pollAgent() }
             }
-        }.resume()
+        }
+        pollTask = task
+        task.resume()
     }
 
     func reportAgentError(_ msg: String) {
