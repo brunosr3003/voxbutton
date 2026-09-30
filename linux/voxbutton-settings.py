@@ -181,7 +181,7 @@ class Settings(Gtk.ApplicationWindow):
         self.langs = Gtk.Entry(placeholder_text="any language", hexpand=True)
         self.min_level = Gtk.SpinButton.new_with_range(-70, -10, 1)
         rows = [
-            ("Whisper model", self.model_label, "Set with --model when starting the server."),
+            ("Whisper model", self.model_label, "Set \"model\" in server.json, then restart the server."),
             ("Dictation languages", self.langs, "Comma-separated, e.g. en,pt. Commands are always English."),
             ("Silence threshold (dBFS)", self.min_level,
              "Clips whose loudest moment is quieter are skipped, so Whisper doesn't invent text. "
