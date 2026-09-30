@@ -4,10 +4,12 @@
 A small always-on-top button that never takes keyboard focus, so the text
 lands in the window you were typing in:
 
-    left-click   dictate (click again to stop)
-    right-click  voice command ("next tab", "send", ...)
-    drag         move it (the position is remembered)
-    gear         settings: devices, how to connect, commands, languages
+    left button   dictate      right button   voice command ("next tab", ...)
+    record mode (settings): toggle = click to start and stop, hold = talk
+                  while holding, always = click once, it types at every pause
+    drag          move it (the position is remembered); in hold mode drag
+                  by the gear
+    gear          settings: devices, how to connect, commands, modes
 
 On Hyprland use linux/voxbutton-button.py instead (Wayland windows can't
 place themselves). Talks to the voxbutton server on this machine; the address
@@ -30,6 +32,15 @@ import urllib.request
 from pathlib import Path
 from tkinter import ttk
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import autostart  # noqa: E402
+
+RECORD_MODES = [
+    ("toggle", "Toggle: click to start, click to stop"),
+    ("hold", "Hold: talk while holding the button"),
+    ("always", "Always on: click once, it types at every pause"),
+]
+
 WIN = sys.platform == "win32"
 if WIN:
     CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "voxbutton"
@@ -43,7 +54,7 @@ GEAR_R = 9
 KEY = "#010203"  # transparent color key on Windows
 COLORS = {
     "offline": "#5a5a61", "idle": "#222226", "recording": "#e53333", "command": "#3373f2",
-    "busy": "#f29a1a", "done": "#33bf59", "error": "#994dd9",
+    "busy": "#f29a1a", "listening": "#1aa699", "done": "#33bf59", "error": "#994dd9",
 }
 
 
@@ -123,7 +134,8 @@ def no_activate(win: tk.Tk) -> None:
 class Button:
     def __init__(self, root: tk.Tk, client: Client):
         self.root, self.client = root, client
-        self.state, self.mode = "offline", "chat"
+        self.state, self.mode, self.record_mode = "offline", "chat", "toggle"
+        self.talking = False
         self.flash_kind, self.flash_until = "", 0.0
         self.settings: Settings | None = None
         self.press: tuple[int, int, int, int] | None = None
@@ -141,7 +153,8 @@ class Button:
         self.cv.bind("<ButtonPress-1>", self.on_press)
         self.cv.bind("<B1-Motion>", self.on_drag)
         self.cv.bind("<ButtonRelease-1>", lambda e: self.on_release(e, "chat"))
-        self.cv.bind("<ButtonRelease-3>", lambda e: self.on_release(e, "command"))
+        self.cv.bind("<ButtonPress-3>", self.on_right_press)
+        self.cv.bind("<ButtonRelease-3>", self.on_right_release)
         if WIN:
             root.update_idletasks()
             no_activate(root)
@@ -165,12 +178,32 @@ class Button:
 
     # input
 
+    def on_gear(self, x: int, y: int) -> bool:
+        g = SIZE - GEAR_R - 1
+        return (x - g) ** 2 + (y - g) ** 2 <= (GEAR_R + 3) ** 2 and self.state not in ("recording", "listening")
+
+    def send(self, path: str) -> None:
+        threading.Thread(target=lambda: self.apply_async(self.client.call("POST", path)), daemon=True).start()
+
     def on_press(self, e):
         self.press = (e.x_root, e.y_root, self.root.winfo_x(), self.root.winfo_y())
         self.dragged = False
+        if self.record_mode == "hold" and not self.on_gear(e.x, e.y) and self.state != "busy":
+            self.talking = True
+            self.send("/record/start?mode=chat")
+
+    def on_right_press(self, e):
+        if self.record_mode == "hold":
+            self.send("/record/start?mode=command")
+
+    def on_right_release(self, e):
+        if self.record_mode == "hold":
+            self.send("/record/stop")
+        else:
+            self.on_release(e, "command")
 
     def on_drag(self, e):
-        if not self.press:
+        if not self.press or self.talking:
             return
         dx, dy = e.x_root - self.press[0], e.y_root - self.press[1]
         if not self.dragged and dx * dx + dy * dy < 16:
@@ -179,18 +212,20 @@ class Button:
         self.root.geometry(f"+{self.press[2] + dx}+{self.press[3] + dy}")
 
     def on_release(self, e, mode: str):
+        if self.talking and mode == "chat":
+            self.talking = False
+            self.send("/record/stop")
+            return
         if self.dragged:
             self.dragged, self.press = False, None
             self.save_pos()
             return
-        gx = gy = SIZE - GEAR_R - 1
-        if (e.x - gx) ** 2 + (e.y - gy) ** 2 <= (GEAR_R + 3) ** 2 and self.state != "recording":
+        if self.on_gear(e.x, e.y):
             self.open_settings()
             return
         if self.state == "busy":
             return
-        threading.Thread(target=lambda: self.apply_async(self.client.call("POST", f"/record/toggle?mode={mode}")),
-                         daemon=True).start()
+        self.send(f"/record/toggle?mode={mode}")
 
     def open_settings(self):
         if self.settings and self.settings.win.winfo_exists():
@@ -217,6 +252,7 @@ class Button:
         else:
             self.state = s["state"] if s.get("agent") or s["state"] != "idle" else "offline"
             self.mode = s.get("mode", "chat")
+            self.record_mode = s.get("record_mode", self.record_mode)
             if s.get("flash"):
                 self.flash(s["flash"])
 
@@ -241,7 +277,7 @@ class Button:
         look = self.flash_kind if time.time() < self.flash_until else self.state
         color = COLORS["command" if look == "recording" and self.mode == "command" else look]
         c, r = SIZE / 2, SIZE / 2 - 6
-        if look == "recording":
+        if look in ("recording", "listening"):
             p = 2 + 2 * (0.5 + 0.5 * math.sin(time.time() * 5))
             cv.create_oval(c - r - p, c - r - p, c + r + p, c + r + p, fill=color, outline="", stipple="gray50")
         cv.create_oval(c - r, c - r, c + r, c + r, fill=color, outline="")
@@ -261,7 +297,7 @@ class Button:
                           style="arc", outline=fg, width=2.2 * s)
             cv.create_line(c, cy + 7 * s, c, top + ch + 6 * s, fill=fg, width=2.2 * s)
             cv.create_line(c - 5 * s, top + ch + 6 * s, c + 5 * s, top + ch + 6 * s, fill=fg, width=2.2 * s)
-        if look != "recording":
+        if look not in ("recording", "listening"):
             g = SIZE - GEAR_R - 1
             cv.create_oval(g - GEAR_R, g - GEAR_R, g + GEAR_R, g + GEAR_R, fill="#38383f", outline="")
             pts = []
@@ -358,6 +394,19 @@ class Settings:
 
     def build_general(self):
         f = self.general
+        self.heading(f, "Recording")
+        self.rec_mode = tk.StringVar(value=RECORD_MODES[0][1])
+        ttk.Combobox(f, textvariable=self.rec_mode, values=[d for _, d in RECORD_MODES], state="readonly",
+                     width=48).pack(anchor="w")
+        ttk.Label(f, wraplength=580, foreground="#777", text=(
+            "Always on: start a sentence with “command” to run it as one, e.g. “command next tab”. "
+            "In hold mode, drag the button by its gear.")).pack(anchor="w", pady=(2, 6))
+        self.auto = tk.BooleanVar(value=autostart.enabled())
+        ttk.Checkbutton(f, text="Start with the computer", variable=self.auto,
+                        command=self.on_autostart).pack(anchor="w")
+        self.auto_hint = tk.StringVar(value=autostart.describe())
+        ttk.Label(f, textvariable=self.auto_hint, foreground="#777", wraplength=580).pack(anchor="w")
+
         self.heading(f, "Transcription")
         self.model = tk.StringVar()
         self.langs = tk.StringVar()
@@ -380,9 +429,9 @@ class Settings:
         ttk.Label(row, textvariable=self.saved).pack(side="left", padx=10)
         self.heading(f, "Button")
         ttk.Label(f, wraplength=580, foreground="#777", text=(
-            "Left-click: dictate · Right-click: voice command · Drag: move · Gear: this window.\n"
-            "Colors: dark ready, red dictating, blue command, orange transcribing, green done, "
-            "purple error, gray no microphone.")).pack(anchor="w")
+            "Left button: dictate · Right button: voice command · Drag: move · Gear: this window.\n"
+            "Colors: dark ready, red dictating, blue command, teal listening, orange transcribing, "
+            "green done, purple error, gray no microphone.")).pack(anchor="w")
 
     def refresh(self):
         if not self.win.winfo_exists():
@@ -418,7 +467,16 @@ class Settings:
             self.model.set(s.get("model", ""))
             self.langs.set(",".join(s.get("languages") or []))
             self.level.set(s.get("min_level", -34))
+            self.rec_mode.set(dict(RECORD_MODES).get(s.get("record_mode"), RECORD_MODES[0][1]))
             self.loaded = True
+
+    def on_autostart(self):
+        try:
+            autostart.set_enabled(self.auto.get())
+            self.auto_hint.set(autostart.describe() if self.auto.get() else "Off.")
+        except (OSError, subprocess.SubprocessError) as e:
+            self.auto_hint.set(f"Couldn't change it: {e}")
+            self.auto.set(autostart.enabled())
 
     def save(self):
         try:
@@ -426,8 +484,10 @@ class Settings:
         except (tk.TclError, ValueError):
             self.saved.set("The threshold must be a number")
             return
+        mode = next((m for m, d in RECORD_MODES if d == self.rec_mode.get()), "toggle")
         r = self.client.call("POST", "/config", {
-            "languages": [l.strip() for l in self.langs.get().split(",") if l.strip()], "min_level": level})
+            "languages": [l.strip() for l in self.langs.get().split(",") if l.strip()], "min_level": level,
+            "record_mode": mode})
         self.saved.set("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 
 

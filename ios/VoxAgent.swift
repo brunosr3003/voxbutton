@@ -120,8 +120,12 @@ final class Agent: ObservableObject {
                     status.pointee = .haveData
                     return buf
                 }
-                if let p = out.int16ChannelData {
-                    capture.append(Data(bytes: p[0], count: Int(out.frameLength) * 2))
+                if let p = out.int16ChannelData, out.frameLength > 0 {
+                    let n = Int(out.frameLength)
+                    var sum: Float = 0
+                    for i in 0..<n { let v = Float(p[0][i]) / 32768; sum += v * v }
+                    capture.append(Data(bytes: p[0], count: n * 2), level: 10 * log10(max(sum / Float(n), 1e-12)),
+                                   seconds: Double(n) / 16000)
                 }
             }
             engine.prepare()
@@ -172,6 +176,8 @@ final class Agent: ObservableObject {
                 let cmd = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["cmd"] as? String
                 switch cmd {
                 case "start": begin()
+                case "listen": listen()
+                case "stop" where listening: stopListening()
                 case "stop": await finish()
                 default: break
                 }
@@ -181,6 +187,26 @@ final class Agent: ObservableObject {
                 try? await Task.sleep(for: .seconds(3))
             }
         }
+    }
+
+    @Published var listening = false
+
+    private func listen() {
+        if !engine.isRunning { restartAudio() }
+        capture.onSegment = { [weak self] pcm in
+            Task { @MainActor in await self?.send(pcm, segment: true) }
+        }
+        capture.listen()
+        listening = true
+        recording = true
+        status = "Listening…"
+    }
+
+    private func stopListening() {
+        _ = capture.stop()
+        listening = false
+        recording = false
+        status = "Ready"
     }
 
     private func begin() {
@@ -195,15 +221,20 @@ final class Agent: ObservableObject {
         recording = false
         let pcm = capture.stop()
         status = "Transcribing…"
+        await send(pcm, segment: false)
+    }
+
+    private func send(_ pcm: Data, segment: Bool) async {
         guard var req = request("/transcribe", method: "POST", timeout: 120) else { return }
         req.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
         req.setValue("1", forHTTPHeaderField: "X-Agent")
+        if segment { req.setValue("1", forHTTPHeaderField: "X-Segment") }
         do {
             let (data, resp) = try await URLSession.shared.upload(for: req, from: wav(pcm))
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             if (resp as? HTTPURLResponse)?.statusCode == 200 {
                 lastText = json?["text"] as? String ?? ""
-                status = "Ready"
+                status = listening ? "Listening…" : "Ready"
             } else {
                 status = "Error: \(json?["error"] as? String ?? "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)")"
             }
@@ -249,15 +280,68 @@ final class Agent: ObservableObject {
     }
 }
 
-/// Audio collected on the realtime thread, read on the main actor.
+/// Audio collected on the realtime thread, read on the main actor. In listen
+/// mode ("always on") it cuts the stream at pauses and hands each piece over.
 final class Capture: @unchecked Sendable {
+    static let speech: Float = -40  // dBFS: louder than this counts as talking
+    static let pause = 0.8  // s of quiet that ends a segment
+    static let preroll = 0.3  // s kept from before the speech started
+    static let maxLength = 25.0  // s
+
     private let lock = NSLock()
     private var data = Data()
-    private var _active = false
+    private var mode = 0  // 0 off, 1 recording, 2 listening
+    private var ring = Data()
+    private var talking = false
+    private var quiet = 0.0
+    var onSegment: ((Data) -> Void)?
 
-    var active: Bool { lock.withLock { _active } }
+    var active: Bool { lock.withLock { mode != 0 } }
 
-    func start() { lock.withLock { data.removeAll(); _active = true } }
-    func append(_ d: Data) { lock.withLock { if _active { data.append(d) } } }
-    func stop() -> Data { lock.withLock { _active = false; return data } }
+    func start() { lock.withLock { data.removeAll(); mode = 1 } }
+
+    func listen() { lock.withLock { data.removeAll(); ring.removeAll(); talking = false; mode = 2 } }
+
+    func stop() -> Data {
+        let (out, segment) = lock.withLock { () -> (Data, Data?) in
+            let seg = mode == 2 && talking ? data : nil
+            mode = 0
+            talking = false
+            return (data, seg)
+        }
+        if let segment, segment.count >= 12800 { onSegment?(segment) }
+        return out
+    }
+
+    func append(_ d: Data, level: Float, seconds: Double) {
+        var ready: Data?
+        lock.withLock {
+            switch mode {
+            case 1:
+                data.append(d)
+            case 2:
+                if talking {
+                    data.append(d)
+                    quiet = level < Self.speech ? quiet + seconds : 0
+                    if quiet >= Self.pause || Double(data.count) / 32000 >= Self.maxLength {
+                        if data.count >= 12800 { ready = data }  // >= 0.4 s
+                        data.removeAll()
+                        ring.removeAll()
+                        talking = false
+                    }
+                } else if level >= Self.speech {
+                    talking = true
+                    quiet = 0
+                    data = ring + d
+                } else {
+                    ring.append(d)
+                    let keep = Int(Self.preroll * 32000) & ~1
+                    if ring.count > keep { ring = ring.suffix(keep) }
+                }
+            default:
+                break
+            }
+        }
+        if let ready { onSegment?(ready) }
+    }
 }

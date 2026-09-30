@@ -9,6 +9,7 @@ import glob
 import io
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -42,7 +43,9 @@ DEFAULTS = {
     "trust": [],  # IPs allowed without the token, e.g. a phone's Tailscale address
     "public_url": "",  # HTTPS address for devices outside the tailnet, shown in settings
     "type": True,  # type the text; false only returns it
+    "record_mode": "toggle",  # toggle: click/click · hold: push-to-talk · always: keeps listening
 }
+RECORD_MODES = ("toggle", "hold", "always")
 
 
 def load_config() -> dict:
@@ -235,7 +238,8 @@ class Remote:
     def __init__(self, stream: "StreamWatcher | None" = None):
         self.stream = stream
         self.cond = threading.Condition()
-        self.state = "idle"  # idle | recording | busy
+        self.state = "idle"  # idle | recording | busy | listening
+        self.record_mode = "toggle"
         self.since = time.time()
         self.agents: dict[str, dict] = {}  # name -> {"seen", "prio", "gen"}
         self.cmds: dict[str, str] = {}
@@ -274,23 +278,38 @@ class Remote:
                 return None
             return self.cmds.pop(name, None)
 
-    def toggle(self, mode: str = "chat") -> str:
+    def start(self, mode: str = "chat") -> str:
+        """Starts a recording ("chat" or "command"), or continuous listening
+        when the record mode is "always". Returns an error or ""."""
         with self.cond:
-            if self.state == "idle":
-                best = self._best()
-                if not best:
-                    self.flash = ("error", time.time())
-                    return "no microphone available" if self._alive() else "no microphone agent connected"
-                self.active = best
-                self.mode = mode
-                self.cmds[best] = "start"
-                self._set("recording")
-                log(f"recording {mode} on {best}")
-            elif self.state == "recording" and self.active:
-                self.cmds[self.active] = "stop"
-                self._set("busy")
+            if self.state != "idle":
+                return ""
+            best = self._best()
+            if not best:
+                self.flash = ("error", time.time())
+                return "no microphone available" if self._alive() else "no microphone agent connected"
+            self.active = best
+            self.mode = mode
+            listen = self.record_mode == "always" and mode == "chat"
+            self.cmds[best] = "listen" if listen else "start"
+            self._set("listening" if listen else "recording")
+            log(f"{'listening' if listen else 'recording ' + mode} on {best}")
             self.cond.notify_all()
             return ""
+
+    def stop(self) -> None:
+        with self.cond:
+            if self.state in ("recording", "listening") and self.active:
+                self.cmds[self.active] = "stop"
+                # Listening already delivered its segments; a recording still has to.
+                self._set("busy" if self.state == "recording" else "idle")
+                self.cond.notify_all()
+
+    def toggle(self, mode: str = "chat") -> str:
+        if self.state in ("recording", "listening"):
+            self.stop()
+            return ""
+        return self.start(mode)
 
     def devices(self) -> dict:
         with self.cond:
@@ -313,9 +332,9 @@ class Remote:
                 ],
             }
 
-    def finished(self, ok: bool) -> None:
+    def finished(self, ok: bool, segment: bool = False) -> None:
         with self.cond:
-            if self.state != "idle":
+            if self.state != "idle" and not (segment and self.state == "listening"):
                 self._set("idle")
             self.flash = ("done" if ok else "error", time.time())
 
@@ -335,6 +354,7 @@ class Remote:
                 "agent": self._best() is not None or self.state != "idle",
                 "mic": self.active if self.state != "idle" else self._best(),
                 "mode": self.mode,
+                "record_mode": self.record_mode,
                 "flash": kind if now - at < 1.2 else "",
             }
 
@@ -390,6 +410,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         "model": transcribe.model_name,
                         "languages": transcribe.languages,
                         "min_level": transcribe.min_level,
+                        "record_mode": remote.record_mode,
                     },
                     "connect": {**urls, "token": token},
                     "commands": commands.CATALOG,
@@ -411,13 +432,18 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
 
         def do_POST(self):
             path = urlsplit(self.path).path
-            if path not in ("/transcribe", "/record/toggle", "/agent/error", "/config"):
+            if path not in ("/transcribe", "/record/toggle", "/record/start", "/record/stop", "/agent/error", "/config"):
                 return self.reply(404, {"error": "not found"})
             if not self.authorized():
                 return self.reply(401, {"error": "bad token"})
             query = parse_qs(urlsplit(self.path).query)
-            if path == "/record/toggle":
-                err = remote.toggle("command" if query.get("mode") == ["command"] else "chat")
+            if path in ("/record/toggle", "/record/start", "/record/stop"):
+                mode = "command" if query.get("mode") == ["command"] else "chat"
+                if path == "/record/stop":
+                    remote.stop()
+                    err = ""
+                else:
+                    err = (remote.start if path == "/record/start" else remote.toggle)(mode)
                 return self.reply(503 if err else 200, {"error": err} if err else remote.snapshot())
             if path == "/config":
                 # Only from this machine's own settings window, never through the proxy.
@@ -429,10 +455,14 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         transcribe.languages = [l.strip() for l in body["languages"] if l.strip()]
                     if "min_level" in body:
                         transcribe.min_level = float(body["min_level"])
+                    if body.get("record_mode") in RECORD_MODES:
+                        remote.record_mode = body["record_mode"]
                 except (ValueError, TypeError, AttributeError) as e:
                     return self.reply(400, {"error": str(e)})
-                save_config({"languages": transcribe.languages, "min_level": transcribe.min_level})
-                log(f"settings: languages={transcribe.languages} min_level={transcribe.min_level}")
+                save_config({"languages": transcribe.languages, "min_level": transcribe.min_level,
+                             "record_mode": remote.record_mode})
+                log(f"settings: languages={transcribe.languages} min_level={transcribe.min_level} "
+                    f"record_mode={remote.record_mode}")
                 return self.reply(200, {"ok": True})
             if path == "/agent/error":
                 log(f"agent error: {self.rfile.read(int(self.headers.get('Content-Length') or 0))[:300]!r}")
@@ -447,7 +477,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
         def finished(self, ok: bool) -> None:
             # Only the mic agent's uploads belong to the button's recording.
             if self.headers.get("X-Agent"):
-                remote.finished(ok)
+                remote.finished(ok, segment=bool(self.headers.get("X-Segment")))
 
         def transcribe(self):
             length = int(self.headers.get("Content-Length") or 0)
@@ -459,7 +489,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
             language = self.headers.get("X-Language") or None
             query = parse_qs(urlsplit(self.path).query)
             mode = (query.get("mode") or [self.headers.get("X-Mode") or ""])[0]
-            if not mode and self.headers.get("X-Agent"):
+            segment = bool(self.headers.get("X-Segment"))  # a pause-delimited piece of "always" listening
+            if not mode and self.headers.get("X-Agent") and not segment:
                 mode = remote.mode
             command = mode == "command"
             t = time.time()
@@ -472,7 +503,10 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 log(f"transcribe failed: {e}")
                 self.finished(False)
                 return self.reply(500, {"error": str(e)})
-            log(f"[{lang}]{' command' if command else ''} {time.time() - t:.2f}s: {text!r}")
+            if segment and (m := re.match(r"^\W*(?:command|comando)\b[\s,.:!-]*(.+)$", text, re.I)):
+                # "command next tab" while always listening runs as a command.
+                command, text = True, m.group(1)
+            log(f"[{lang}]{' command' if command else ''}{' segment' if segment else ''} {time.time() - t:.2f}s: {text!r}")
             if command:
                 if not text:
                     self.finished(False)
@@ -552,7 +586,9 @@ def main() -> None:
     host = cfg["host"] or tailscale_ip() or "127.0.0.1"
     transcriber = Transcriber(cfg["model"], cfg["device"], cfg["compute_type"], cfg["language"] or None,
                               cfg["prompt"] or None, cfg["languages"], float(cfg["min_level"]))
-    handler = make_handler(transcriber, Remote(StreamWatcher()), token, cfg["type"], set(cfg["trust"]),
+    remote = Remote(StreamWatcher())
+    remote.record_mode = cfg["record_mode"] if cfg["record_mode"] in RECORD_MODES else "toggle"
+    handler = make_handler(transcriber, remote, token, cfg["type"], set(cfg["trust"]),
                            {"local": f"http://{host}:{cfg['port']}", "public": cfg["public_url"]})
     server = ThreadingHTTPServer((host, int(cfg["port"])), handler)
     log(f"listening on http://{host}:{cfg['port']} ({platform.KIND}; config in {CONFIG_DIR})")

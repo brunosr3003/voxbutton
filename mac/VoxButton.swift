@@ -108,6 +108,7 @@ final class App: NSObject, NSApplicationDelegate {
     var panel: Panel!
     var view: ButtonView!
     var recorder: AVAudioRecorder?
+    var listener: Listener?
     var meter: Timer?
     var resetTimer: Timer?
     let file = FileManager.default.temporaryDirectory.appendingPathComponent("voxbutton.wav")
@@ -179,11 +180,17 @@ final class App: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch cmd {
+                case "listen" where self.recorder == nil && self.listener == nil:
+                    let l = Listener { [weak self] wav in DispatchQueue.main.async { self?.upload(wav, segment: true) } }
+                    if l.start() { self.listener = l } else { self.reportAgentError("can't listen: check microphone permission") }
+                case "stop" where self.listener != nil:
+                    self.listener?.stop()
+                    self.listener = nil
                 case "start" where self.recorder == nil:
                     if !self.start() { self.reportAgentError("can't record: check microphone permission") }
                 case "stop" where self.recorder != nil:
                     self.stopAndSend()
-                case "start", "stop":
+                case "start", "stop", "listen":
                     self.reportAgentError("got \(cmd!) while \(self.recorder == nil ? "idle" : "recording")")
                 default:
                     break
@@ -251,18 +258,27 @@ final class App: NSObject, NSApplicationDelegate {
         recorder = nil
         meter?.invalidate()
         view.level = 0
-        guard let cfg = Config.load(), let url = URL(string: cfg.server)?.appendingPathComponent("transcribe"),
-              let audio = try? Data(contentsOf: file) else {
+        guard let audio = try? Data(contentsOf: file) else {
             flash(.error)
             reportAgentError("couldn't read the recording")
             return
         }
-        view.state = .busy
+        upload(audio, segment: false)
+    }
+
+    /// Sends audio to be transcribed; `segment` marks a piece of "always" listening.
+    func upload(_ audio: Data, segment: Bool) {
+        guard let cfg = Config.load(), let url = URL(string: cfg.server)?.appendingPathComponent("transcribe") else {
+            flash(.error)
+            return
+        }
+        if !segment { view.state = .busy }
         var req = URLRequest(url: url, timeoutInterval: 120)
         req.httpMethod = "POST"
         req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
         req.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
         req.setValue("1", forHTTPHeaderField: "X-Agent")
+        if segment { req.setValue("1", forHTTPHeaderField: "X-Segment") }
         if let lang = cfg.language { req.setValue(lang, forHTTPHeaderField: "X-Language") }
         URLSession.shared.uploadTask(with: req, from: audio) { [weak self] data, resp, err in
             let ok = (resp as? HTTPURLResponse)?.statusCode == 200
@@ -296,6 +312,101 @@ final class App: NSObject, NSApplicationDelegate {
         a.informativeText = text
         NSApp.activate(ignoringOtherApps: true)
         a.runModal()
+    }
+}
+
+/// "Always on": keeps the mic open and hands over each stretch of speech,
+/// cut at the pauses, as a 16 kHz mono WAV.
+final class Listener {
+    static let speech: Float = -40  // dBFS: louder than this counts as talking
+    static let pause = 0.8  // s of quiet that ends a segment
+    static let preroll = 0.3  // s kept from before the speech started
+    static let maxLength = 25.0  // s, a segment is sent even without a pause
+
+    private let engine = AVAudioEngine()
+    private let onSegment: (Data) -> Void
+    private let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
+    private var converter: AVAudioConverter?
+    private var ring = Data()  // recent audio before speech starts
+    private var current = Data()
+    private var talking = false
+    private var quiet = 0.0
+
+    init(onSegment: @escaping (Data) -> Void) { self.onSegment = onSegment }
+
+    func start() -> Bool {
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, let conv = AVAudioConverter(from: format, to: target) else { return false }
+        converter = conv
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in self?.feed(buf) }
+        do {
+            try engine.start()
+            return true
+        } catch {
+            input.removeTap(onBus: 0)
+            return false
+        }
+    }
+
+    func stop() {
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        if talking { flush() }
+    }
+
+    private func feed(_ buf: AVAudioPCMBuffer) {
+        guard let converter else { return }
+        let cap = AVAudioFrameCount(Double(buf.frameLength) * target.sampleRate / buf.format.sampleRate) + 32
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: cap) else { return }
+        var fed = false
+        converter.convert(to: out, error: nil) { _, status in
+            if fed { status.pointee = .noDataNow; return nil }
+            fed = true
+            status.pointee = .haveData
+            return buf
+        }
+        guard let p = out.int16ChannelData, out.frameLength > 0 else { return }
+        let n = Int(out.frameLength)
+        var sum: Float = 0
+        for i in 0..<n { let v = Float(p[0][i]) / 32768; sum += v * v }
+        let level = 10 * log10(max(sum / Float(n), 1e-12))
+        let chunk = Data(bytes: p[0], count: n * 2)
+        let seconds = Double(n) / target.sampleRate
+
+        if talking {
+            current.append(chunk)
+            quiet = level < Self.speech ? quiet + seconds : 0
+            if quiet >= Self.pause || Double(current.count) / 32000 >= Self.maxLength { flush() }
+        } else if level >= Self.speech {
+            talking = true
+            quiet = 0
+            current = ring + chunk
+        } else {
+            ring.append(chunk)
+            let keep = Int(Self.preroll * 32000) & ~1
+            if ring.count > keep { ring = ring.suffix(keep) }
+        }
+    }
+
+    private func flush() {
+        let pcm = current
+        talking = false
+        current = Data()
+        ring = Data()
+        if Double(pcm.count) / 32000 >= 0.4 { onSegment(Listener.wav(pcm)) }
+    }
+
+    static func wav(_ pcm: Data) -> Data {
+        var d = Data()
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        d.append(contentsOf: Array("RIFF".utf8)); u32(UInt32(36 + pcm.count))
+        d.append(contentsOf: Array("WAVE".utf8))
+        d.append(contentsOf: Array("fmt ".utf8)); u32(16); u16(1); u16(1); u32(16000); u32(32000); u16(2); u16(16)
+        d.append(contentsOf: Array("data".utf8)); u32(UInt32(pcm.count))
+        d.append(pcm)
+        return d
     }
 }
 

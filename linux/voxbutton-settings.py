@@ -19,6 +19,15 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "desktop"))
+import autostart  # noqa: E402
+
+RECORD_MODES = [
+    ("toggle", "Toggle: click to start, click to stop"),
+    ("hold", "Hold: talk while holding the button"),
+    ("always", "Always on: click once, it types at every pause"),
+]
+
 APP_ID = "voxbutton-settings"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
 REPO = "https://github.com/brunosr3003/voxbutton"
@@ -149,6 +158,23 @@ class Settings(Gtk.ApplicationWindow):
     def general_page(self) -> Gtk.Widget:
         page = box(True, 12)
         page.add_css_class("page")
+        page.append(label("Recording", "title"))
+        rec = Gtk.Grid(column_spacing=14, row_spacing=10)
+        self.record_mode = Gtk.DropDown.new_from_strings([d for _, d in RECORD_MODES])
+        self.record_mode.set_hexpand(True)
+        rec.attach(label("Mode"), 0, 0, 1, 1)
+        rec.attach(self.record_mode, 1, 0, 1, 1)
+        rec.attach(label("Always on: start a sentence with “command” to run it as one, e.g. "
+                         "“command next tab”. In hold mode, drag the button by its gear.", "dim", wrap=True), 1, 1, 1, 1)
+        self.autostart = Gtk.Switch(halign=Gtk.Align.START, active=autostart.enabled())
+        self.autostart.connect("state-set", self.on_autostart)
+        rec.attach(label("Start with the computer"), 0, 2, 1, 1)
+        rec.attach(self.autostart, 1, 2, 1, 1)
+        self.autostart_hint = label(autostart.describe(), "dim", wrap=True)
+        rec.attach(self.autostart_hint, 1, 3, 1, 1)
+        page.append(rec)
+
+        page.append(Gtk.Separator(margin_top=8))
         page.append(label("Transcription", "title"))
         grid = Gtk.Grid(column_spacing=14, row_spacing=10)
         self.model_label = label("", "mono")
@@ -174,9 +200,10 @@ class Settings(Gtk.ApplicationWindow):
 
         page.append(Gtk.Separator(margin_top=8))
         page.append(label("Button", "title"))
-        page.append(label("Left-click: dictate · Right-click: voice command · Gear: this window.\n"
-                          "Colors: dark ready, red dictating, blue command, orange transcribing, "
-                          "green done, purple error, faded no microphone.", "dim", wrap=True))
+        page.append(label("Left button: dictate · Right button: voice command · Gear: this window · "
+                          "hold and move: drag it.\n"
+                          "Colors: dark ready, red dictating, blue command, teal listening, orange "
+                          "transcribing, green done, purple error, faded no microphone.", "dim", wrap=True))
         self.general_loaded = False
         return page
 
@@ -246,12 +273,26 @@ class Settings(Gtk.ApplicationWindow):
             self.model_label.set_text(s.get("model", ""))
             self.langs.set_text(",".join(s.get("languages") or []))
             self.min_level.set_value(s.get("min_level", -34))
+            modes = [m for m, _ in RECORD_MODES]
+            self.record_mode.set_selected(modes.index(s.get("record_mode", "toggle"))
+                                          if s.get("record_mode") in modes else 0)
             self.general_loaded = True
+        return False
+
+    def on_autostart(self, switch, on: bool) -> bool:
+        try:
+            autostart.set_enabled(on)
+            self.autostart_hint.set_text(autostart.describe() if on else "Off.")
+        except (OSError, subprocess.SubprocessError) as e:
+            self.autostart_hint.set_text(f"Couldn't change it: {e}")
+            switch.set_state(autostart.enabled())
+            return True
         return False
 
     def save(self, *_):
         body = {"languages": [l for l in self.langs.get_text().split(",") if l.strip()],
-                "min_level": self.min_level.get_value()}
+                "min_level": self.min_level.get_value(),
+                "record_mode": RECORD_MODES[self.record_mode.get_selected()][0]}
         r = api(self.server, self.token, "POST", "/config", body)
         self.save_status.set_text("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 
