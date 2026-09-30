@@ -2,7 +2,8 @@
 """Floating microphone button for Hyprland.
 
 Left-click to dictate, right-click for a voice command ("next tab",
-"workspace 2", "send"...); click again (either button) to stop. The recording itself
+"workspace 2", "send"...); click again (either button) to stop. The gear in
+the corner opens the settings. The recording itself
 happens wherever the mic agent runs (the Mac app), the text is typed here by
 the voxbutton server. Clicking it hands keyboard focus straight back to the
 window you were typing in, so that's where the text lands.
@@ -28,6 +29,7 @@ from gi.repository import GLib, Gtk  # noqa: E402
 
 APP_ID = "voxbutton-button"
 SIZE = 64
+GEAR_R = 9  # the settings badge in the bottom-right corner
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
 
 COLORS = {
@@ -158,7 +160,28 @@ class Button(Gtk.ApplicationWindow):
             GLib.idle_add(self.apply_state, s)
             time.sleep(0.25)
 
-    def on_click(self, gesture, *_):
+    def on_gear(self, x: float, y: float) -> bool:
+        gx, gy = SIZE - GEAR_R - 1, SIZE - GEAR_R - 1
+        return (x - gx) ** 2 + (y - gy) ** 2 <= (GEAR_R + 3) ** 2
+
+    def open_settings(self) -> None:
+        """Brings the settings window up, starting it if it isn't running."""
+        try:
+            clients = json.loads(hypr("clients", "-j") or "[]")
+        except ValueError:
+            clients = []
+        for c in clients:
+            if c.get("class") == "voxbutton-settings":
+                hypr("dispatch", 'hl.dsp.focus({ window = "address:%s" })' % c["address"])
+                return
+        script = Path(__file__).with_name("voxbutton-settings.py")
+        subprocess.Popen([sys.executable, str(script), "--server", self.client.server],
+                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def on_click(self, gesture, n_press, x, y):
+        if self.on_gear(x, y) and self.state != "recording":
+            threading.Thread(target=self.open_settings, daemon=True).start()
+            return
         if self.state == "busy":
             return
         mode = "command" if gesture.get_current_button() == 3 else "chat"
@@ -216,8 +239,31 @@ class Button(Gtk.ApplicationWindow):
             for i in (-1, 0, 1):
                 cr.arc(cx + i * 7 * s, cy, 2.4 * s, 0, 2 * math.pi)
                 cr.fill()
-            return
-        # Microphone: capsule, cradle, stem and base.
+        else:
+            self.draw_mic(cr, cx, cy, s)
+        if look != "recording":
+            self.draw_gear(cr, w - GEAR_R - 1, h - GEAR_R - 1)
+
+    @staticmethod
+    def draw_gear(cr, gx: float, gy: float) -> None:
+        cr.set_source_rgba(0.22, 0.22, 0.25, 0.97)
+        cr.arc(gx, gy, GEAR_R, 0, 2 * math.pi)
+        cr.fill()
+        cr.set_source_rgba(1, 1, 1, 0.9)
+        teeth, outer, inner = 8, GEAR_R * 0.72, GEAR_R * 0.52
+        for i in range(teeth * 2):
+            a = i * math.pi / teeth
+            r = outer if i % 2 == 0 else inner
+            (cr.move_to if i == 0 else cr.line_to)(gx + r * math.cos(a), gy + r * math.sin(a))
+        cr.close_path()
+        cr.fill()
+        cr.set_source_rgba(0.22, 0.22, 0.25, 1)
+        cr.arc(gx, gy, GEAR_R * 0.24, 0, 2 * math.pi)
+        cr.fill()
+
+    @staticmethod
+    def draw_mic(cr, cx: float, cy: float, s: float) -> None:
+        # Capsule, cradle, stem and base.
         cw, ch = 8 * s, 14 * s
         top = cy - 11 * s
         cr.arc(cx, top + cw / 2, cw / 2, math.pi, 0)

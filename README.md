@@ -64,6 +64,7 @@ Useful options (`uv run voxbutton-server --help`):
 | `--min-level` | `-34` | clips quieter than this (dBFS, loudest 100 ms) count as silence |
 | `--prompt` | none | bias the vocabulary: project names, jargon |
 | `--host` / `--port` | Tailscale IP / 8765 | |
+| `--public-url` | none | HTTPS address shown in settings for devices outside the tailnet |
 | `--no-type` | | only return the text |
 | `--trust IP` | | accept this IP without a token (repeatable) |
 
@@ -102,6 +103,12 @@ records a **voice command** instead (the button turns blue while it listens):
 
 Add `N times` to repeat (`next tab 3 times`). Commands are English only. They
 live in `server/src/voxbutton_server/commands.py`, one small function each.
+
+The **gear** in the button's corner opens the settings window: which devices
+are connected and which one a click will record on, how to connect a new Mac
+or iPhone (addresses and token with copy buttons), the voice commands, and the
+dictation languages and silence threshold (saved in
+`~/.config/voxbutton/settings.json`).
 
 States: dark = ready, red (pulsing) = dictating, blue = listening for a command, orange = transcribing,
 green = typed, purple = error, faded gray = no microphone agent connected.

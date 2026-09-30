@@ -20,6 +20,7 @@ from voxbutton_server import commands
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
 TOKEN_FILE = CONFIG_DIR / "token"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"  # what the settings window saved; wins over flags
 MAX_BODY = 50 * 1024 * 1024  # ~25 min of 16 kHz mono WAV
 
 
@@ -68,6 +69,7 @@ class Transcriber:
 
         t = time.time()
         self.model = WhisperModel(model, device=device, compute_type=compute_type)
+        self.model_name = model
         self.language = language
         self.prompt = prompt
         self.languages = languages
@@ -234,6 +236,27 @@ class Remote:
             self.cond.notify_all()
             return ""
 
+    def devices(self) -> dict:
+        with self.cond:
+            now = time.time()
+            peer = self.stream.current() if self.stream else None
+            best = self._best()
+            return {
+                "stream": {"peer": peer, "mbit": round(self.stream.rate / 1e6, 1) if peer else 0},
+                "devices": [
+                    {
+                        "name": n,
+                        "online": now - a["seen"] < self.AGENT_TIMEOUT,
+                        "seen_ago": round(now - a["seen"]),
+                        "ips": sorted(a.get("ips", ())),
+                        "priority": a.get("prio", 0),
+                        "streaming": bool(peer and peer in a.get("ips", ())),
+                        "selected": n == best,
+                    }
+                    for n, a in sorted(self.agents.items())
+                ],
+            }
+
     def finished(self, ok: bool) -> None:
         with self.cond:
             if self.state != "idle":
@@ -264,7 +287,8 @@ def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
-def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: bool, trusted: set[str]):
+def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: bool, trusted: set[str],
+                 urls: dict[str, str]):
     last = {"typed": 0}  # length of the last dictation, for the "delete that" command
 
     class Handler(BaseHTTPRequestHandler):
@@ -303,6 +327,17 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 return self.reply(401, {"error": "bad token"})
             if path == "/state":
                 self.reply(200, remote.snapshot())
+            elif path == "/info":
+                self.reply(200, {
+                    **remote.devices(),
+                    "settings": {
+                        "model": transcribe.model_name,
+                        "languages": transcribe.languages,
+                        "min_level": transcribe.min_level,
+                    },
+                    "connect": {**urls, "token": token},
+                    "commands": commands.CATALOG,
+                })
             elif path == "/agent/wait":
                 q = parse_qs(urlsplit(self.path).query)
                 name = q.get("name", ["mac"])[0][:32]
@@ -320,7 +355,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
 
         def do_POST(self):
             path = urlsplit(self.path).path
-            if path not in ("/transcribe", "/record/toggle", "/agent/error"):
+            if path not in ("/transcribe", "/record/toggle", "/agent/error", "/config"):
                 return self.reply(404, {"error": "not found"})
             if not self.authorized():
                 return self.reply(401, {"error": "bad token"})
@@ -328,6 +363,22 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
             if path == "/record/toggle":
                 err = remote.toggle("command" if query.get("mode") == ["command"] else "chat")
                 return self.reply(503 if err else 200, {"error": err} if err else remote.snapshot())
+            if path == "/config":
+                # Only from this machine's own settings window, never through the proxy.
+                if self.headers.get("X-Forwarded-For"):
+                    return self.reply(403, {"error": "local only"})
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                    if "languages" in body:
+                        transcribe.languages = [l.strip() for l in body["languages"] if l.strip()]
+                    if "min_level" in body:
+                        transcribe.min_level = float(body["min_level"])
+                except (ValueError, TypeError, AttributeError) as e:
+                    return self.reply(400, {"error": str(e)})
+                SETTINGS_FILE.write_text(json.dumps(
+                    {"languages": transcribe.languages, "min_level": transcribe.min_level}, indent=2) + "\n")
+                log(f"settings: languages={transcribe.languages} min_level={transcribe.min_level}")
+                return self.reply(200, {"ok": True})
             if path == "/agent/error":
                 log(f"agent error: {self.rfile.read(int(self.headers.get('Content-Length') or 0))[:300]!r}")
                 remote.finished(False)
@@ -416,6 +467,7 @@ def main() -> None:
     ap.add_argument("--prompt", help="initial prompt to bias vocabulary (names, jargon)")
     ap.add_argument("--trust", action="append", default=[], metavar="IP",
                     help="accept requests from this IP without a token (e.g. a Tailscale device); repeatable")
+    ap.add_argument("--public-url", help="HTTPS address for devices outside the tailnet (shown in settings)")
     ap.add_argument("--no-type", action="store_true", help="only return the text, don't type it")
     ap.add_argument("--print-token", action="store_true", help="print the auth token and exit")
     args = ap.parse_args()
@@ -427,10 +479,19 @@ def main() -> None:
     if not args.no_type and not shutil.which("wtype"):
         sys.exit("wtype not found: install it (e.g. `sudo pacman -S wtype`) or pass --no-type")
 
+    if SETTINGS_FILE.exists():
+        try:
+            saved = json.loads(SETTINGS_FILE.read_text())
+            args.languages = ",".join(saved.get("languages", args.languages.split(",")))
+            args.min_level = float(saved.get("min_level", args.min_level))
+        except (ValueError, TypeError) as e:
+            log(f"ignoring {SETTINGS_FILE}: {e}")
+
     host = args.host or tailscale_ip() or "127.0.0.1"
     transcriber = Transcriber(args.model, args.device, args.compute_type, args.language, args.prompt,
                               [l for l in args.languages.split(",") if l], args.min_level)
-    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, Remote(StreamWatcher()), token, not args.no_type, set(args.trust)))
+    server = ThreadingHTTPServer((host, args.port), make_handler(transcriber, Remote(StreamWatcher()), token, not args.no_type, set(args.trust),
+                                              {"local": f"http://{host}:{args.port}", "public": args.public_url or ""}))
     log(f"listening on http://{host}:{args.port} (token in {TOKEN_FILE})")
     try:
         server.serve_forever()
