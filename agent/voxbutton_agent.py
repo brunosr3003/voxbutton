@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""VoxButton mic agent for Linux: lends this machine's microphone to the
-voxbutton server, like the Mac and iPhone apps do. Use it on the Linux box you
-sit at (e.g. a laptop running Moonlight); the button on the PC then records
-here when this machine is the one receiving the stream.
+"""VoxButton mic agent for Linux and Windows: lends this machine's microphone
+to the voxbutton server, like the Mac and iPhone apps do. Use it on the
+computer you sit at (e.g. a laptop running Moonlight); the button on the PC
+then records here when this machine is the one receiving the stream.
 
     voxbutton_agent.py                 run in the foreground
-    voxbutton_agent.py --install       run at login (systemd user service)
+    voxbutton_agent.py --install       run at login (systemd user service on
+                                       Linux, the Startup folder on Windows)
     voxbutton_agent.py --uninstall
+    voxbutton_agent.py --devices       list microphones (Windows: their numbers)
 
-Config: ~/.config/voxbutton/config.json, same as the Mac app:
+Config: config.json in ~/.config/voxbutton (Windows: %APPDATA%\voxbutton),
+same as the Mac app:
     {"server": "http://<pc-tailscale-ip>:8765", "token": "..."}
 
-Records with whatever is there: parec (PulseAudio / PipeWire-pulse),
-pw-record (PipeWire) or arecord (ALSA). No Python packages needed.
+No Python packages needed. Linux records with parec, pw-record or arecord;
+Windows with the built-in WinMM API.
 """
 
 import argparse
@@ -32,7 +35,11 @@ import urllib.request
 from array import array
 from pathlib import Path
 
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton" / "config.json"
+WIN = sys.platform == "win32"
+if WIN:
+    CONFIG = Path(os.environ.get("APPDATA", Path.home())) / "voxbutton" / "config.json"
+else:
+    CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton" / "config.json"
 RATE = 16000
 CHUNK = 1600  # samples per read: 100 ms
 BYTES_PER_SECOND = RATE * 2
@@ -43,8 +50,20 @@ ONCE_TIMEOUT = 8.0  # s a voice command waits for speech
 ONCE_CHUNK = 4.0  # s: a voice command goes at most this long after speech starts
 
 
+LOG_FILE = CONFIG.with_name("agent.log")
+
+
 def log(msg: str) -> None:
-    print(time.strftime("%H:%M:%S"), msg, flush=True)
+    line = f"{time.strftime('%H:%M:%S')} {msg}"
+    if sys.stdout is None:  # pythonw (Windows autostart): no console, keep a log file
+        try:
+            CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+        return
+    print(line, flush=True)
 
 
 # --- recording ------------------------------------------------------------------
@@ -61,6 +80,112 @@ def recorder_cmd(device: str | None) -> list[str]:
         return ["arecord", "-q", "-f", "S16_LE", "-r", str(RATE), "-c", "1", "-t", "raw",
                 *(["-D", device] if device else [])]
     sys.exit("no recorder found: install pulseaudio-utils (parec), pipewire (pw-record) or alsa-utils (arecord)")
+
+
+class WinRecorder:
+    """Windows: WinMM waveIn, 16 kHz mono 16-bit (Windows converts from the
+    device's own format), polled buffers, no callbacks into Python."""
+
+    NBUF = 6
+
+    def __init__(self, device: str | None, on_chunk):
+        import ctypes
+        from ctypes import wintypes
+
+        self.ct, self.wt = ctypes, wintypes
+        self.winmm = ctypes.WinDLL("winmm")
+        self.on_chunk = on_chunk
+        self.device = int(device) if device not in (None, "") else 0xFFFFFFFF  # WAVE_MAPPER
+        self.handle = wintypes.HANDLE()
+        self.running = False
+
+        class WAVEFORMATEX(ctypes.Structure):
+            _fields_ = [("wFormatTag", wintypes.WORD), ("nChannels", wintypes.WORD),
+                        ("nSamplesPerSec", wintypes.DWORD), ("nAvgBytesPerSec", wintypes.DWORD),
+                        ("nBlockAlign", wintypes.WORD), ("wBitsPerSample", wintypes.WORD),
+                        ("cbSize", wintypes.WORD)]
+
+        class WAVEHDR(ctypes.Structure):
+            pass
+
+        WAVEHDR._fields_ = [("lpData", ctypes.c_void_p), ("dwBufferLength", wintypes.DWORD),
+                            ("dwBytesRecorded", wintypes.DWORD), ("dwUser", ctypes.c_size_t),
+                            ("dwFlags", wintypes.DWORD), ("dwLoops", wintypes.DWORD),
+                            ("lpNext", ctypes.POINTER(WAVEHDR)), ("reserved", ctypes.c_size_t)]
+        self.WAVEFORMATEX, self.WAVEHDR = WAVEFORMATEX, WAVEHDR
+        w = self.winmm
+        w.waveInOpen.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.UINT, ctypes.POINTER(WAVEFORMATEX),
+                                 ctypes.c_size_t, ctypes.c_size_t, wintypes.DWORD]
+        for name in ("waveInPrepareHeader", "waveInUnprepareHeader", "waveInAddBuffer"):
+            getattr(w, name).argtypes = [wintypes.HANDLE, ctypes.POINTER(WAVEHDR), wintypes.UINT]
+        for name in ("waveInStart", "waveInStop", "waveInReset", "waveInClose"):
+            getattr(w, name).argtypes = [wintypes.HANDLE]
+
+    def start(self) -> None:
+        ct, w = self.ct, self.winmm
+        fmt = self.WAVEFORMATEX(1, 1, RATE, BYTES_PER_SECOND, 2, 16, 0)
+        rc = w.waveInOpen(ct.byref(self.handle), self.device, ct.byref(fmt), 0, 0, 0)
+        if rc != 0:
+            raise OSError(f"waveInOpen failed ({rc}): no microphone, or access is blocked in "
+                          "Settings > Privacy > Microphone")
+        size = CHUNK * 2
+        self.bufs = [ct.create_string_buffer(size) for _ in range(self.NBUF)]
+        self.hdrs = []
+        for b in self.bufs:
+            h = self.WAVEHDR()
+            h.lpData, h.dwBufferLength = ct.cast(b, ct.c_void_p), size
+            w.waveInPrepareHeader(self.handle, ct.byref(h), ct.sizeof(h))
+            w.waveInAddBuffer(self.handle, ct.byref(h), ct.sizeof(h))
+            self.hdrs.append(h)
+        self.running = True
+        w.waveInStart(self.handle)
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        ct, w = self.ct, self.winmm
+        i = 0
+        while self.running:
+            h = self.hdrs[i]
+            if not h.dwFlags & 1:  # WHDR_DONE
+                time.sleep(0.01)
+                continue
+            data = ct.string_at(h.lpData, h.dwBytesRecorded)
+            if not self.running:
+                break
+            h.dwFlags &= ~1
+            h.dwBytesRecorded = 0
+            w.waveInAddBuffer(self.handle, ct.byref(h), ct.sizeof(h))
+            if data:
+                self.on_chunk(data)
+            i = (i + 1) % self.NBUF
+
+    def stop(self) -> None:
+        if not self.running:
+            return
+        self.running = False
+        ct, w = self.ct, self.winmm
+        w.waveInReset(self.handle)
+        for h in self.hdrs:
+            w.waveInUnprepareHeader(self.handle, ct.byref(h), ct.sizeof(h))
+        w.waveInClose(self.handle)
+
+
+def win_devices() -> list[str]:
+    import ctypes
+    from ctypes import wintypes
+
+    class WAVEINCAPSW(ctypes.Structure):
+        _fields_ = [("wMid", wintypes.WORD), ("wPid", wintypes.WORD), ("vDriverVersion", wintypes.UINT),
+                    ("szPname", wintypes.WCHAR * 32), ("dwFormats", wintypes.DWORD),
+                    ("wChannels", wintypes.WORD), ("wReserved1", wintypes.WORD)]
+
+    winmm = ctypes.WinDLL("winmm")
+    out = []
+    for i in range(winmm.waveInGetNumDevs()):
+        caps = WAVEINCAPSW()
+        if winmm.waveInGetDevCapsW(i, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
+            out.append(caps.szPname)
+    return out
 
 
 class Recorder:
@@ -174,6 +299,19 @@ class Segmenter:
 
 def local_ips() -> list[str]:
     ips = set()
+    if WIN:
+        try:
+            ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
+        except OSError:
+            pass
+        exe = shutil.which("tailscale") or str(Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+                                                 / "Tailscale" / "tailscale.exe")
+        try:
+            out = subprocess.run([exe, "ip", "-4"], capture_output=True, text=True, timeout=5, creationflags=0x08000000)
+            ips.update(out.stdout.split())
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return sorted(ip for ip in ips if not ip.startswith("127."))
     try:
         out = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, timeout=3).stdout
         for line in out.splitlines():
@@ -189,6 +327,10 @@ def local_ips() -> list[str]:
 
 def moonlight_running() -> bool:
     try:
+        if WIN:
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Moonlight.exe", "/NH"], capture_output=True,
+                                 text=True, timeout=5, creationflags=0x08000000).stdout
+            return "moonlight" in out.lower()
         return subprocess.run(["pgrep", "-if", "moonlight"], capture_output=True, timeout=3).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -251,8 +393,15 @@ class Agent:
             self.upload(pcm, segment=True)
 
     def _start_recorder(self) -> None:
-        self.recorder = Recorder(self.device, self.on_chunk)
-        self.recorder.start()
+        self.recorder = (WinRecorder if WIN else Recorder)(self.device, self.on_chunk)
+        try:
+            self.recorder.start()
+        except OSError as e:
+            log(str(e))
+            self.recorder = None
+            with self.lock:
+                self.mode = ""
+            self.report_error(str(e))
 
     def _stop_recorder(self) -> None:
         r, self.recorder = self.recorder, None
@@ -333,7 +482,27 @@ class Agent:
 UNIT = "voxbutton-agent.service"
 
 
+def install_windows(on: bool) -> None:
+    link = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup/voxbutton-agent.lnk"
+    if not on:
+        link.unlink(missing_ok=True)
+        print(f"removed {link}")
+        return
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    ps = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:VB_LINK);"
+          "$s.TargetPath = $env:VB_EXE; $s.Arguments = '\"' + $env:VB_SCRIPT + '\"';"
+          "$s.WorkingDirectory = $env:VB_DIR; $s.Save()")
+    env = {**os.environ, "VB_LINK": str(link), "VB_EXE": str(pyw if pyw.exists() else sys.executable),
+           "VB_SCRIPT": str(Path(__file__).resolve()), "VB_DIR": str(Path(__file__).resolve().parent)}
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True, env=env)
+    subprocess.Popen([env["VB_EXE"], env["VB_SCRIPT"]], creationflags=0x00000008)  # DETACHED_PROCESS
+    print(f"added {link} and started the agent")
+
+
 def install(on: bool) -> None:
+    if WIN:
+        install_windows(on)
+        return
     unit = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "systemd/user" / UNIT
     if on:
         unit.parent.mkdir(parents=True, exist_ok=True)
@@ -359,15 +528,27 @@ WantedBy=default.target
 
 
 def main() -> None:
+    if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+        # The Windows console is cp1252 and can't print "→" or accented text.
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", help="voxbutton server (default: from config.json)")
     ap.add_argument("--token", help="auth token (default: from config.json)")
     ap.add_argument("--name", default=socket.gethostname().split(".")[0].lower(), help="name shown in settings")
-    ap.add_argument("--device", help="input device / source (default: the system default)")
+    ap.add_argument("--device", help="input device: a source name on Linux, a number from --devices on Windows "
+                                     "(default: the system default)")
     ap.add_argument("--install", action="store_true", help="run at login as a systemd user service")
     ap.add_argument("--uninstall", action="store_true")
+    ap.add_argument("--devices", action="store_true", help="list microphones and exit")
     args = ap.parse_args()
 
+    if args.devices:
+        if WIN:
+            for i, name in enumerate(win_devices()):
+                print(f"{i}: {name}")
+        else:
+            subprocess.run(["pactl", "list", "short", "sources"] if shutil.which("pactl") else ["arecord", "-l"])
+        return
     if args.install or args.uninstall:
         install(args.install)
         return

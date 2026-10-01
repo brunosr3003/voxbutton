@@ -377,8 +377,8 @@ class Settings:
             "~/.config/voxbutton/config.json:")).pack(anchor="w", pady=(8, 2))
         self.mac_cfg = self.copy_row(f, "config.json")
         ttk.Label(f, wraplength=580, justify="left", text=(
-            "Linux: save the same config.json, then run agent/voxbutton_agent.py --install "
-            "(starts now and at every login).")).pack(anchor="w", pady=(8, 2))
+            "Linux or Windows: save the same config.json (Windows: in %APPDATA%\\voxbutton), then run "
+            "agent/voxbutton_agent.py --install (starts now and at every login).")).pack(anchor="w", pady=(8, 2))
         ttk.Label(f, wraplength=580, justify="left", text=(
             "iPhone: build and install with ios/build.sh from a Mac, open VoxButton, set Server to the "
             "public HTTPS address, paste the Token and turn on “Lend microphone”.")).pack(anchor="w", pady=(8, 2))

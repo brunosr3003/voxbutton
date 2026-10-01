@@ -135,11 +135,12 @@ class Settings(Gtk.ApplicationWindow):
         self.mac_config = self.copy_row("config.json", "", mono=True)
         page.append(self.mac_config)
 
-        page.append(label("Linux", "step"))
+        page.append(label("Linux or Windows", "step"))
         page.append(label(
-            f"1. Clone {REPO} and save the config above as ~/.config/voxbutton/config.json\n"
-            "2. Run  agent/voxbutton_agent.py --install  (starts now and at every login; needs parec, "
-            "pw-record or arecord, no Python packages).",
+            f"1. Clone {REPO} and save the config above as config.json in ~/.config/voxbutton "
+            "(Windows: %APPDATA%\\voxbutton)\n"
+            "2. Run  agent/voxbutton_agent.py --install  (starts now and at every login; no Python "
+            "packages needed. Windows needs Python from python.org).",
             wrap=True, selectable=True))
 
         page.append(label("iPhone", "step"))

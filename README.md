@@ -143,21 +143,31 @@ For Hyprland autostart, next to the server:
 hl.exec_cmd("/path/to/voxbutton/linux/voxbutton-button.py")
 ```
 
-## Linux mic agent
+## Mic agent (Linux and Windows)
 
-Lends a Linux machine's microphone to the button, the way the Mac and iPhone
-apps do, e.g. on a laptop where you run Moonlight. It's one Python file with no
-dependencies. It records with `parec`, `pw-record` or `arecord`, whichever is
-there.
+Lends a computer's microphone to the button, the way the Mac and iPhone apps
+do, e.g. on a laptop where you run Moonlight. It's one Python file with no
+dependencies. On Linux it records with `parec`, `pw-record` or `arecord`,
+whichever is there. On Windows it uses the built-in WinMM API.
 
-```sh
-# ~/.config/voxbutton/config.json: {"server": "http://<pc>:8765", "token": "..."}
-agent/voxbutton_agent.py              # try it in the foreground
-agent/voxbutton_agent.py --install    # run at login (systemd user service)
+Save the server address and token (the settings window has them, with copy
+buttons) as `config.json` in `~/.config/voxbutton/` (Windows:
+`%APPDATA%\voxbutton\`):
+
+```json
+{"server": "http://<pc-tailscale-ip>:8765", "token": "..."}
 ```
 
-It reports its addresses to the server, so it's picked when it's the machine
-receiving the stream. `--device` chooses an input other than the default.
+```sh
+agent/voxbutton_agent.py              # try it in the foreground
+agent/voxbutton_agent.py --install    # run at login: systemd user service / Startup folder
+agent/voxbutton_agent.py --devices    # list microphones; pick one with --device
+```
+
+On Windows, `windows\start-agent.bat` runs it with the Python from python.org.
+In the background it logs to `%APPDATA%\voxbutton\agent.log`. It reports its
+addresses to the server, so it's picked when it's the machine receiving the
+stream.
 
 ## Mac app
 
