@@ -7,9 +7,11 @@ Claude Code or your editor. Tap **`>_`** and say a command ("next tab", "send",
 Whisper on your own GPU, with no cloud APIs. An optional local model shows you
 a corrected version of your English.
 
-It's built for driving a Linux or Windows PC remotely, for example from a Mac or
-an iPhone through Moonlight/Sunshine, which don't forward the microphone. The
-widget lives on the PC, and the device you're streaming to lends it its mic:
+It runs on **Linux** (Hyprland, GNOME, KDE Plasma, Sway and other Wayland
+desktops, or X11) and **Windows**. It's built for driving that PC remotely, for
+example from a Mac or an iPhone through Moonlight/Sunshine, which don't forward
+the microphone. The widget lives on the PC, and the device you're streaming to
+lends it its mic:
 
 ```
  PC with a GPU (Linux or Windows)                     Mac / iPhone / laptop
@@ -27,8 +29,9 @@ widget lives on the PC, and the device you're streaming to lends it its mic:
   you say lands in the window you were typing in.
 - The server sends each recording to the device that's receiving the Moonlight
   stream, so the mic in front of you is the one that listens.
-- Text is typed through a virtual keyboard (`wtype`, `xdotool` or Windows
-  SendInput), so accents and Unicode come through correctly.
+- Text is typed through a virtual keyboard that works on every desktop:
+  `wtype` on Hyprland and Sway, a built-in uinput keyboard on GNOME and KDE
+  (no packages needed), `xdotool` on X11, and SendInput on Windows.
 - Silence is skipped instead of being handed to Whisper, which likes to make
   up text on it.
 - Everything is configured from one file and a settings window, and it all
@@ -37,7 +40,7 @@ widget lives on the PC, and the device you're streaming to lends it its mic:
 ## Contents
 
 - [Using it](#using-it): the buttons, recording modes, voice commands, the English corrector
-- [Server setup (Linux or Windows)](#server-setup-linux-or-windows)
+- [Server setup (Linux or Windows)](#server-setup-linux-or-windows): which desktops, typing, autostart
 - [Configuration](#configuration)
 - [Microphones](#microphones): Mac app, iPhone app, Linux/Windows agent, iOS Shortcut
 - [Settings window](#settings-window)
