@@ -309,15 +309,16 @@ class Button(Gtk.ApplicationWindow):
         if self.correction_seen is None:  # don't replay the last one on startup
             self.correction_seen = cid
             return
-        if cid == self.correction_seen or not c.get("corrected"):
+        if cid == self.correction_seen:
             return
         self.correction_seen = cid
+        # A new phrase replaces the card; a correct one ("clear") just closes it.
         if self.correction_proc and self.correction_proc.poll() is None:
             self.correction_proc.terminate()
+        if c.get("clear") or not c.get("corrected"):
+            return
         script = Path(__file__).with_name("voxbutton-correction.py")
-        # Long text stays up longer: about a quarter second per word.
-        words = len(c["original"].split()) + (0 if c.get("ok") else len(c["corrected"].split()))
-        seconds = c.get("seconds") or (min(10, 3 + words * 0.15) if c.get("ok") else min(25, 5 + words * 0.25))
+        seconds = c.get("seconds") or 0  # 0: stays until closed or replaced
         extra = ["--seconds", f"{seconds:.1f}", *(["--ok"] if c.get("ok") else [])]
         self.correction_proc = subprocess.Popen([sys.executable, str(script), c["original"], c["corrected"], *extra],
                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

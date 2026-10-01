@@ -50,7 +50,7 @@ DEFAULTS = {
     "corrector": False,  # show a corrected version of your English after each dictation
     "corrector_model": "qwen2.5:3b",  # an Ollama model
     "corrector_show": "changes",  # "changes": only when it corrected something · "always": every dictation
-    "card_seconds": 15,  # the correction card stays at least this long, plus half a second per word
+    "card_seconds": 0,  # 0: the card stays until you close it or say something new; else seconds (+½ s/word)
     "corrector_url": "http://127.0.0.1:11434",  # where Ollama listens
 }
 RECORD_MODES = ("toggle", "hold", "always")
@@ -199,10 +199,12 @@ class Corrector:
     def __init__(self, enabled: bool, model: str, url: str, show: str = "changes"):
         self.enabled, self.model, self.url = enabled, model, url.rstrip("/")
         self.show = show if show in ("changes", "always") else "changes"
-        self.card_seconds = 15.0
+        self.card_seconds = 0.0
 
     def seconds(self, original: str, corrected: str, ok: bool) -> float:
-        """How long the card stays: long enough to read it and fix your sentence."""
+        """How long the card stays; 0 = until you close it or the next one replaces it."""
+        if not self.card_seconds:
+            return 0.0
         if ok:
             return min(20.0, max(6.0, self.card_seconds * 0.4) + 0.2 * len(original.split()))
         words = len(original.split()) + len(corrected.split())
@@ -548,7 +550,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         corrector.enabled = bool(body["corrector"])
                         corrector.warm()
                     if "card_seconds" in body:
-                        corrector.card_seconds = min(max(float(body["card_seconds"]), 5.0), 120.0)
+                        v = float(body["card_seconds"])
+                        corrector.card_seconds = 0.0 if v <= 0 else min(max(v, 5.0), 120.0)
                     if body.get("corrector_show") in ("changes", "always"):
                         corrector.show = body["corrector_show"]
                     if body.get("corrector_model"):
@@ -649,6 +652,9 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 return
             ok = corrector.same(text, better)
             if ok and corrector.show != "always":
+                # Nothing to show, but a card from an older phrase shouldn't linger.
+                with remote.cond:
+                    remote.correction = {"id": remote.correction["id"] + 1, "clear": True}
                 return
             log(f"  {'looks good' if ok else 'corrected'} in {time.time() - t:.2f}s: {better!r}")
             with remote.cond:

@@ -279,11 +279,14 @@ class Button:
         if self.correction_seen is None:  # don't replay the last one on startup
             self.correction_seen = cid
             return
-        if cid == self.correction_seen or not c.get("corrected"):
+        if cid == self.correction_seen:
             return
         self.correction_seen = cid
+        # A new phrase replaces the card; a correct one ("clear") just closes it.
         if self.correction_win and self.correction_win.winfo_exists():
             self.correction_win.destroy()
+        if c.get("clear") or not c.get("corrected"):
+            return
         # red: it had to correct you · green: you got it right
         bg, edge = ("#10251a", "#2ec27e") if c.get("ok") else ("#2b1214", "#e01b24")
         w = tk.Toplevel(self.root, bg=bg, highlightthickness=2, highlightbackground=edge, highlightcolor=edge)
@@ -294,9 +297,15 @@ class Button:
         rows = ((("✓ LOOKS GOOD", "#57e389", tag), (c["original"], "#ffffff", ("TkDefaultFont", 11))) if c.get("ok")
                 else (("✗ YOU SAID", "#f66151", tag), (c["original"], "#d8c4c4", ("TkDefaultFont", 10)),
                       ("✓ BETTER", "#57e389", tag), (c["corrected"], "#ffffff", ("TkDefaultFont", 12, "bold"))))
+        close = tk.Label(w, text="✕", fg="#ffffff", bg=bg, font=("TkDefaultFont", 11, "bold"), cursor="hand2")
+        close.place(relx=1.0, x=-10, y=6, anchor="ne")
         for text, color, font in rows:
-            tk.Label(w, text=text, fg=color, bg=bg, font=font, wraplength=width - 36, justify="left",
+            tk.Label(w, text=text, fg=color, bg=bg, font=font, wraplength=width - 50, justify="left",
                      anchor="w").pack(fill="x", padx=18, pady=(8 if font is tag else 0, 0))
+        close.lift()
+        # ✕ or a click anywhere on the card closes it.
+        for widget in (w, *w.winfo_children()):
+            widget.bind("<Button-1>", lambda e: w.destroy())
         tk.Frame(w, height=12, bg=bg).pack()
         w.update_idletasks()
         x = (w.winfo_screenwidth() - width) // 2
@@ -304,10 +313,8 @@ class Button:
         w.geometry(f"{width}x{w.winfo_reqheight()}+{x}+{y}")
         if WIN:
             no_activate(w)
-        # Long text stays up longer: about a quarter second per word.
-        words = len(c["original"].split()) + (0 if c.get("ok") else len(c["corrected"].split()))
-        seconds = c.get("seconds") or (min(10, 3 + words * 0.15) if c.get("ok") else min(25, 5 + words * 0.25))
-        w.after(int(seconds * 1000), lambda: w.winfo_exists() and w.destroy())
+        if c.get("seconds"):  # otherwise it stays until closed or replaced
+            w.after(int(c["seconds"] * 1000), lambda: w.winfo_exists() and w.destroy())
         self.correction_win = w
 
     def flash(self, kind: str):
@@ -501,12 +508,12 @@ class Settings:
         row = ttk.Frame(f)
         row.pack(anchor="w", pady=2)
         ttk.Label(row, text="Model (Ollama)", width=16).pack(side="left")
-        self.card_secs = tk.DoubleVar(value=15)
+        self.card_secs = tk.DoubleVar(value=0)
         row2 = ttk.Frame(f)
         row2.pack(anchor="w", pady=2)
-        ttk.Label(row2, text="Card stays at least (s)", width=22).pack(side="left")
-        ttk.Spinbox(row2, from_=5, to=120, increment=5, textvariable=self.card_secs, width=6).pack(side="left")
-        ttk.Label(row2, text="  plus half a second per word", foreground="#777").pack(side="left")
+        ttk.Label(row2, text="Close the card after (s)", width=22).pack(side="left")
+        ttk.Spinbox(row2, from_=0, to=120, increment=5, textvariable=self.card_secs, width=6).pack(side="left")
+        ttk.Label(row2, text="  0: stays until you close it or say something new", foreground="#777").pack(side="left")
         ttk.Entry(row, textvariable=self.corr_model, width=24).pack(side="left")
         ttk.Label(f, wraplength=580, foreground="#777", text=(
             "A card at the top of the screen shows what you said and a corrected version; what gets "
@@ -574,7 +581,7 @@ class Settings:
             self.level.set(s.get("min_level", -34))
             self.corr.set(bool(s.get("corrector")))
             self.corr_model.set(s.get("corrector_model", ""))
-            self.card_secs.set(s.get("card_seconds", 15))
+            self.card_secs.set(s.get("card_seconds", 0))
             self.corr_show.set(dict(CORRECTOR_SHOW).get(s.get("corrector_show"), CORRECTOR_SHOW[0][1]))
             self.pause.set(s.get("listen_pause", 0.6))
             self.chunk.set(s.get("listen_chunk", 6))

@@ -75,7 +75,7 @@ Everything lives in one folder: `~/.config/voxbutton/` on Linux,
 | `type` | `true` | `false` only returns the text |
 | `corrector` | `false` | show a corrected version of your English (see below) |
 | `corrector_model` | `qwen2.5:3b` | the Ollama model for it |
-| `card_seconds` | `15` | how long the correction card stays at least (plus ½ s per word) |
+| `card_seconds` | `0` | 0: the card stays until closed or replaced; else a timer (plus ½ s per word) |
 | `corrector_show` | `changes` | `changes`: card only when something was corrected · `always`: after every dictation |
 
 For example:
@@ -155,9 +155,10 @@ hl.exec_cmd("/path/to/voxbutton/linux/voxbutton-button.py")
 
 Optional, for non-native speakers: after each dictation, a card at the top of
 the screen shows what you said and a corrected, more natural version. What gets
-typed doesn't change; the card is only there to read, and it never takes focus.
-It stays up at least 15 s (`card_seconds`, also in settings) plus half a second
-per word, up to 90 s, so you have time to read it and fix your sentence.
+typed doesn't change. The card doesn't take focus when it appears. It stays until
+you close it (✕, or a click on it) or your next phrase replaces it.
+Set `card_seconds` (also in settings) to close it on a timer instead: that many
+seconds plus half a second per word.
 It's red when you got something wrong, and green ("looks good") when you said
 it right, if `corrector_show` is `always`.
 Turn it on with the switch in settings → General, or `"corrector": true` in
