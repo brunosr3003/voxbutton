@@ -242,6 +242,7 @@ class Remote:
         self.cond = threading.Condition()
         self.state = "idle"  # idle | recording | busy | listening
         self.record_mode = "toggle"
+        self.command_next = False  # always on: the next piece runs as a command
         self.listen = {"pause": 0.6, "chunk": 6.0}  # sent to agents along with "listen"
         self.since = time.time()
         self.agents: dict[str, dict] = {}  # name -> {"seen", "prio", "gen"}
@@ -285,6 +286,10 @@ class Remote:
         """Starts a recording ("chat" or "command"), or continuous listening
         when the record mode is "always". Returns an error or ""."""
         with self.cond:
+            if self.state == "listening" and mode == "command":
+                # Already listening: no new recording, the next piece is a command.
+                self.command_next = not self.command_next
+                return ""
             if self.state != "idle":
                 return ""
             best = self._best()
@@ -294,7 +299,10 @@ class Remote:
             self.active = best
             self.mode = mode
             listen = self.record_mode == "always" and mode == "chat"
-            self.cmds[best] = "listen" if listen else "start"
+            # A command ends by itself: the agent sends it at the first pause
+            # ("once"), no second click. In hold mode the release ends it.
+            once = mode == "command" and self.record_mode != "hold"
+            self.cmds[best] = "listen" if listen else "once" if once else "start"
             self._set("listening" if listen else "recording")
             log(f"{'listening' if listen else 'recording ' + mode} on {best}")
             self.cond.notify_all()
@@ -306,9 +314,12 @@ class Remote:
                 self.cmds[self.active] = "stop"
                 # Listening already delivered its segments; a recording still has to.
                 self._set("busy" if self.state == "recording" else "idle")
+                self.command_next = False
                 self.cond.notify_all()
 
     def toggle(self, mode: str = "chat") -> str:
+        if self.state == "listening" and mode == "command":
+            return self.start(mode)
         if self.state in ("recording", "listening"):
             self.stop()
             return ""
@@ -356,7 +367,7 @@ class Remote:
                 "state": self.state,
                 "agent": self._best() is not None or self.state != "idle",
                 "mic": self.active if self.state != "idle" else self._best(),
-                "mode": self.mode,
+                "mode": "command" if self.command_next else self.mode,
                 "record_mode": self.record_mode,
                 "flash": kind if now - at < 1.2 else "",
             }
@@ -432,7 +443,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 ips = {ip for ip in q.get("ips", [""])[0].split(",") if ip}
                 ips.add(self.client_address[0])
                 cmd = remote.wait(name, prio, ips)
-                self.reply(200, {"cmd": cmd, **(remote.listen if cmd == "listen" else {})})
+                self.reply(200, {"cmd": cmd, **(remote.listen if cmd in ("listen", "once") else {})})
             else:
                 self.reply(404, {"error": "not found"})
 
@@ -514,7 +525,9 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 log(f"transcribe failed: {e}")
                 self.finished(False)
                 return self.reply(500, {"error": str(e)})
-            if segment and (m := re.match(r"^\W*(?:command|comando)\b[\s,.:!-]*(.+)$", text, re.I)):
+            if segment and remote.command_next:
+                remote.command_next, command = False, True
+            elif segment and (m := re.match(r"^\W*(?:command|comando)\b[\s,.:!-]*(.+)$", text, re.I)):
                 # "command next tab" while always listening runs as a command.
                 command, text = True, m.group(1)
             log(f"[{lang}]{' command' if command else ''}{' segment' if segment else ''} {time.time() - t:.2f}s: {text!r}")

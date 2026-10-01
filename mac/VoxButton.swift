@@ -109,6 +109,8 @@ final class App: NSObject, NSApplicationDelegate {
     var view: ButtonView!
     var recorder: AVAudioRecorder?
     var listener: Listener?
+    var onceActive = false  // a one-shot (voice command) listener is running
+    var onceTimer: Timer?
     var meter: Timer?
     var resetTimer: Timer?
     let file = FileManager.default.temporaryDirectory.appendingPathComponent("voxbutton.wav")
@@ -185,6 +187,10 @@ final class App: NSObject, NSApplicationDelegate {
                         [weak self] wav in DispatchQueue.main.async { self?.upload(wav, segment: true) }
                     }
                     if l.start() { self.listener = l } else { self.reportAgentError("can't listen: check microphone permission") }
+                case "once" where self.recorder == nil && self.listener == nil:
+                    self.listenOnce(pause: json?["pause"] as? Double ?? 0.6)
+                case "stop" where self.listener != nil && self.onceActive:
+                    self.endOnce()
                 case "stop" where self.listener != nil:
                     self.listener?.stop()
                     self.listener = nil
@@ -192,7 +198,7 @@ final class App: NSObject, NSApplicationDelegate {
                     if !self.start() { self.reportAgentError("can't record: check microphone permission") }
                 case "stop" where self.recorder != nil:
                     self.stopAndSend()
-                case "start", "stop", "listen":
+                case "start", "stop", "listen", "once":
                     self.reportAgentError("got \(cmd!) while \(self.recorder == nil ? "idle" : "recording")")
                 default:
                     break
@@ -202,6 +208,42 @@ final class App: NSObject, NSApplicationDelegate {
         }
         pollTask = task
         task.resume()
+    }
+
+    /// Voice command: record until the first pause, send it, stop. Gives up
+    /// after 8 s without speech.
+    func listenOnce(pause: Double) {
+        let l = Listener(pause: pause, chunk: 15) { [weak self] wav in
+            DispatchQueue.main.async {
+                guard let self, self.onceActive else { return }
+                self.onceActive = false
+                self.onceTimer?.invalidate()
+                self.onceTimer = nil
+                self.listener?.stop()
+                self.listener = nil
+                self.upload(wav, segment: false)
+            }
+        }
+        guard l.start() else {
+            reportAgentError("can't listen: check microphone permission")
+            return
+        }
+        listener = l
+        onceActive = true
+        onceTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in self?.endOnce() }
+    }
+
+    /// Stops a one-shot listener early (second click or timeout). What was
+    /// said so far still goes out through the callback above.
+    func endOnce() {
+        guard onceActive, let l = listener else { return }
+        if !l.stop() {
+            onceActive = false
+            onceTimer?.invalidate()
+            onceTimer = nil
+            listener = nil
+            reportAgentError("no speech heard")
+        }
     }
 
     func reportAgentError(_ msg: String) {
@@ -358,10 +400,14 @@ final class Listener {
         }
     }
 
-    func stop() {
+    /// Returns whether a last piece was sent.
+    @discardableResult
+    func stop() -> Bool {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        if talking { send(upTo: current.count) }
+        guard talking else { return false }
+        send(upTo: current.count)
+        return true
     }
 
     private func feed(_ buf: AVAudioPCMBuffer) {

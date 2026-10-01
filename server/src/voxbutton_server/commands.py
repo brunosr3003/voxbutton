@@ -125,7 +125,7 @@ def _(m, c):
     key("Escape", c.times)
 
 
-@command("delete that", r"(?:delete|undo|erase|scratch) (?:that|this|it)", say=['delete that', 'undo that'], does='Erase the last dictation')
+@command("delete that", r"(?:delete|undo|erase|scratch)(?: that| this| it)?", say=['delete that', 'undo that'], does='Erase the last dictation')
 def _(m, c):
     if not c.last_typed:
         raise LookupError("nothing dictated to delete")
@@ -209,26 +209,50 @@ REPEAT = re.compile(r"^(.*?) (\d+) (?:times|x)$")
 TYPE = re.compile(r"^(?:type|write)\s+(.+)$", re.I | re.S)
 
 
-def run(text: str, last_typed: int = 0, dry: bool = False) -> str:
-    """Runs the command in `text`, returns its name. Raises LookupError when
-    nothing matches or the command doesn't apply here. `dry` only matches."""
-    raw = text.strip()
+SPLIT = re.compile(r"\s*(?:[,;.!?]+|\band then\b|\bthen\b|\band\b)\s*", re.I)
+
+
+def _one(raw: str, last_typed: int, dry: bool) -> str:
     # "type ..." keeps the original casing and accents.
     stripped = re.sub(r"^[^\w]+", "", raw)
     if m := TYPE.match(stripped):
-        if dry:
-            return "type"
-        type_text(m.group(1).strip().rstrip(".") + " ")
+        if not dry:
+            type_text(m.group(1).strip().rstrip(".") + " ")
         return "type"
 
     t = normalize(raw)
     times = 1
     if m := REPEAT.match(t):
         t, times = m.group(1), min(int(m.group(2)), 20)
-    ctx = Ctx(app=platform.active_app(), times=times, last_typed=last_typed)
+    ctx = Ctx(app=platform.active_app() if not dry else "", times=times, last_typed=last_typed)
     for name, pat, fn in COMMANDS:
         if m := pat.match(t):
             if not dry:
                 fn(m, ctx)
             return name
     raise LookupError(f"unknown command: {t!r}")
+
+
+def run(text: str, last_typed: int = 0, dry: bool = False) -> str:
+    """Runs the command(s) in `text` and returns their names. Several can be
+    chained ("up, down, send", "next tab then send"); they're all matched
+    before any runs, so a half-understood sentence does nothing. Raises
+    LookupError when something doesn't match or doesn't apply here."""
+    raw = text.strip()
+    try:
+        return _one(raw, last_typed, dry)
+    except LookupError:
+        parts = [p for p in SPLIT.split(raw) if p.strip()]
+        if len(parts) < 2 or TYPE.match(re.sub(r"^[^\w]+", "", raw)):
+            raise
+    for p in parts:
+        _one(p, last_typed, dry=True)  # raises on the first unknown part
+    names = []
+    for p in parts:
+        try:
+            names.append(_one(p, last_typed, dry))
+        except LookupError:
+            continue  # matched but doesn't apply right now, e.g. a second "delete that"
+        if names[-1] == "delete that":
+            last_typed = 0
+    return " + ".join(names) or "nothing"

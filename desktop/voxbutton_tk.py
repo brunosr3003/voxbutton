@@ -275,7 +275,7 @@ class Button:
         cv = self.cv
         cv.delete("all")
         look = self.flash_kind if time.time() < self.flash_until else self.state
-        color = COLORS["command" if look == "recording" and self.mode == "command" else look]
+        color = COLORS["command" if look in ("recording", "listening") and self.mode == "command" else look]
         c, r = SIZE / 2, SIZE / 2 - 6
         if look in ("recording", "listening"):
             p = 2 + 2 * (0.5 + 0.5 * math.sin(time.time() * 5))

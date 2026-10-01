@@ -308,7 +308,7 @@ class Button(Gtk.ApplicationWindow):
 
     def draw(self, _area, cr, w, h):
         look = self.flash_kind if time.time() < self.flash_until else self.state
-        color = "command" if look == "recording" and self.mode == "command" else look
+        color = "command" if look in ("recording", "listening") and self.mode == "command" else look
         r, g, b, a = COLORS.get(color, COLORS["idle"])
         cx, cy, rad = w / 2, h / 2, min(w, h) / 2 - 4
         if look in ("recording", "listening"):

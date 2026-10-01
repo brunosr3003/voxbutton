@@ -178,6 +178,8 @@ final class Agent: ObservableObject {
                 switch cmd {
                 case "start": begin()
                 case "listen": listen(pause: json?["pause"] as? Double ?? 0.6, chunk: json?["chunk"] as? Double ?? 6)
+                case "once": listenOnce(pause: json?["pause"] as? Double ?? 0.6)
+                case "stop" where onceActive: endOnce()
                 case "stop" where listening: stopListening()
                 case "stop": await finish()
                 default: break
@@ -201,6 +203,52 @@ final class Agent: ObservableObject {
         listening = true
         recording = true
         status = "Listening…"
+    }
+
+    private var onceActive = false
+
+    /// Voice command: record until the first pause, send it, stop. Gives up
+    /// after 8 s without speech.
+    private func listenOnce(pause: Double) {
+        if !engine.isRunning { restartAudio() }
+        capture.onSegment = { [weak self] pcm in
+            Task { @MainActor in
+                guard let self, self.onceActive else { return }
+                self.onceActive = false
+                _ = self.capture.stopListening()
+                self.listening = false
+                self.recording = false
+                self.status = "Running command…"
+                await self.send(pcm, segment: false)
+            }
+        }
+        capture.listen(pause: pause, chunk: 15)
+        onceActive = true
+        listening = true
+        recording = true
+        status = "Listening for a command…"
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(8))
+            self.endOnce()
+        }
+    }
+
+    /// Ends a one-shot listen early (second click or timeout); what was said so
+    /// far still goes out through onSegment.
+    private func endOnce() {
+        guard onceActive else { return }
+        if !capture.stopListening() {
+            onceActive = false
+            listening = false
+            recording = false
+            status = "Ready"
+            Task {
+                if var e = request("/agent/error", method: "POST", timeout: 10) {
+                    e.httpBody = Data("no speech heard".utf8)
+                    _ = try? await URLSession.shared.data(for: e)
+                }
+            }
+        }
     }
 
     private func stopListening() {
@@ -313,6 +361,18 @@ final class Capture: @unchecked Sendable {
             self.chunk = chunk
             mode = 2
         }
+    }
+
+    /// Ends listening; returns whether a last piece went to onSegment.
+    func stopListening() -> Bool {
+        let segment = lock.withLock { () -> Data? in
+            let seg = mode == 2 && talking && data.count >= 12800 ? data : nil
+            mode = 0
+            talking = false
+            return seg
+        }
+        if let segment { onSegment?(segment) }
+        return segment != nil
     }
 
     func stop() -> Data {
