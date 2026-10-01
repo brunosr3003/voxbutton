@@ -181,6 +181,11 @@ final class App: NSObject, NSApplicationDelegate {
             let cmd = json?["cmd"] as? String
             DispatchQueue.main.async {
                 guard let self else { return }
+                if ["start", "listen", "once"].contains(cmd ?? "") {
+                    // A new recording replaces whatever is left over, e.g. after the
+                    // server restarted mid-recording and its "stop" never came.
+                    self.discardCapture()
+                }
                 switch cmd {
                 case "listen" where self.recorder == nil && self.listener == nil:
                     let l = Listener(pause: json?["pause"] as? Double ?? 0.6, chunk: json?["chunk"] as? Double ?? 6) {
@@ -208,6 +213,18 @@ final class App: NSObject, NSApplicationDelegate {
         }
         pollTask = task
         task.resume()
+    }
+
+    func discardCapture() {
+        if recorder != nil || listener != nil { NSLog("voxbutton: dropping a leftover recording") }
+        recorder?.stop()
+        recorder = nil
+        meter?.invalidate()
+        onceActive = false
+        onceTimer?.invalidate()
+        onceTimer = nil
+        listener?.cancel()
+        listener = nil
     }
 
     /// Voice command: record until the first pause, send it, stop. Gives up
@@ -409,6 +426,13 @@ final class Listener {
             input.removeTap(onBus: 0)
             return false
         }
+    }
+
+    /// Stops without sending anything.
+    func cancel() {
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        talking = false
     }
 
     /// Returns whether a last piece was sent.

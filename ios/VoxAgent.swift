@@ -195,6 +195,7 @@ final class Agent: ObservableObject {
     @Published var listening = false
 
     private func listen(pause: Double, chunk: Double) {
+        onceActive = false
         if !engine.isRunning { restartAudio() }
         capture.onSegment = { [weak self] pcm in
             Task { @MainActor in await self?.send(pcm, segment: true) }
@@ -259,6 +260,7 @@ final class Agent: ObservableObject {
     }
 
     private func begin() {
+        onceActive = false  // a new recording replaces anything left over
         if !engine.isRunning { restartAudio() }
         capture.start()
         recording = true

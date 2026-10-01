@@ -416,6 +416,14 @@ class Agent:
     # commands from the server
 
     def handle(self, cmd: str, params: dict) -> None:
+        if cmd in ("start", "listen", "once") and self.mode:
+            # A new recording replaces whatever is left over, e.g. after the server
+            # restarted mid-recording and its "stop" never came.
+            log(f"dropping a leftover {self.mode}")
+            self._end_once_timer()
+            self._stop_recorder()
+            with self.lock:
+                self.mode = ""
         busy = self.mode != ""
         if cmd == "start" and not busy:
             with self.lock:
