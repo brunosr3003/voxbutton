@@ -143,6 +143,22 @@ For Hyprland autostart, next to the server:
 hl.exec_cmd("/path/to/voxbutton/linux/voxbutton-button.py")
 ```
 
+## Linux mic agent
+
+Lends a Linux machine's microphone to the button, the way the Mac and iPhone
+apps do, e.g. on a laptop where you run Moonlight. It's one Python file with no
+dependencies. It records with `parec`, `pw-record` or `arecord`, whichever is
+there.
+
+```sh
+# ~/.config/voxbutton/config.json: {"server": "http://<pc>:8765", "token": "..."}
+agent/voxbutton_agent.py              # try it in the foreground
+agent/voxbutton_agent.py --install    # run at login (systemd user service)
+```
+
+It reports its addresses to the server, so it's picked when it's the machine
+receiving the stream. `--device` chooses an input other than the default.
+
 ## Mac app
 
 Requirements: macOS 14+ and the Xcode command line tools.
