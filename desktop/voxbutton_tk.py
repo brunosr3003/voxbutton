@@ -282,7 +282,7 @@ class Button:
         tk.Frame(w, height=12, bg="#18181b").pack()
         w.update_idletasks()
         x = (w.winfo_screenwidth() - width) // 2
-        y = w.winfo_screenheight() - w.winfo_reqheight() - 80
+        y = 70
         w.geometry(f"{width}x{w.winfo_reqheight()}+{x}+{y}")
         if WIN:
             no_activate(w)
@@ -462,7 +462,7 @@ class Settings:
         ttk.Label(row, text="Model (Ollama)", width=16).pack(side="left")
         ttk.Entry(row, textvariable=self.corr_model, width=24).pack(side="left")
         ttk.Label(f, wraplength=580, foreground="#777", text=(
-            "A card at the bottom of the screen shows what you said and a corrected version; what gets "
+            "A card at the top of the screen shows what you said and a corrected version; what gets "
             "typed doesn't change.")).pack(anchor="w")
 
         self.heading(f, "Transcription")

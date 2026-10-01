@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shows a corrected version of what you just dictated, at the bottom of the
+"""Shows a corrected version of what you just dictated, at the top of the
 screen, for a few seconds. It never takes focus (it's only there to read), so
 typing carries on where it was. The button starts it; one at a time.
 
@@ -32,7 +32,7 @@ def add_window_rule() -> None:
     # no_focus: never takes focus, so it can't swallow what you're typing.
     lua = ('hl.window_rule({ match = { class = "^(%s)$" }, float = true, pin = true, no_focus = true, '
            'no_initial_focus = true, decorate = false, border_size = 0, no_shadow = true, no_blur = true, '
-           'move = { "(monitor_w-%d)*0.5", "monitor_h-60-window_h" } })' % (APP_ID, WIDTH))
+           'move = { "(monitor_w-%d)*0.5", "70" } })' % (APP_ID, WIDTH))
     try:
         subprocess.run(["hyprctl", "eval", lua], capture_output=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):

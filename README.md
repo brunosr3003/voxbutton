@@ -148,7 +148,7 @@ hl.exec_cmd("/path/to/voxbutton/linux/voxbutton-button.py")
 
 ## English corrector
 
-Optional, for non-native speakers: after each dictation, a card at the bottom of
+Optional, for non-native speakers: after each dictation, a card at the top of
 the screen shows what you said and a corrected, more natural version. What gets
 typed doesn't change; the card is only there to read, and it never takes focus.
 Turn it on with the switch in settings → General, or `"corrector": true` in

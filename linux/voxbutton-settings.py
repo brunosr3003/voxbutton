@@ -197,7 +197,7 @@ class Settings(Gtk.ApplicationWindow):
         self.corrector_model = Gtk.Entry(hexpand=True)
         corr.attach(label("Show a better version"), 0, 0, 1, 1)
         corr.attach(self.corrector, 1, 0, 1, 1)
-        corr.attach(label("After each dictation, a card at the bottom of the screen shows what you said and a "
+        corr.attach(label("After each dictation, a card at the top of the screen shows what you said and a "
                           "corrected, more natural version. What gets typed doesn't change.", "dim", wrap=True),
                     1, 1, 1, 1)
         corr.attach(label("Model"), 0, 2, 1, 1)
