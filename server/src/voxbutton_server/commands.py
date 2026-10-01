@@ -115,7 +115,7 @@ def _(m, c):
     platform.focus_direction(DIR[d])
 
 
-@command("enter", r"enter", r"send(?: it)?", r"submit", r"confirm", r"ok", r"okay", r"return", say=['send', 'enter', 'submit'], does='Press Enter')
+@command("enter", r"enter", r"send(?: it)?", r"submit", r"confirm", r"ok", r"okay", r"return", r"yes", say=['send', 'enter', 'yes', 'confirm'], does='Press Enter (also answers “are you sure?”)')
 def _(m, c):
     key("Return", c.times)
 
@@ -206,6 +206,14 @@ CLAUDE = r"(?:claude|cloud|clod|clawed|claud|cloude)"
          say=["open claude code", "new claude in kitty"], does="Open Claude Code in a new terminal (kitty)")
 def _(m, c):
     platform.open_terminal(["claude"])
+
+
+@command("kill all tabs", r"(?:kill|close)(?: all| every)(?: the| of the)? (?:tabs|tab|taps)",
+         r"(?:kill|close) (?:the |this )?(?:whole |entire )?window",
+         say=["kill all tabs", "close all tabs"],
+         does="Close the focused window with all its tabs (kitty/browser ask to confirm: say “yes”)")
+def _(m, c):
+    platform.close_window()
 
 
 @command("tab key", r"tab key", r"press tab", say=['tab key', 'press tab'], does='Press Tab')

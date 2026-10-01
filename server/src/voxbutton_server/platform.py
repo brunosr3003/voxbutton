@@ -186,6 +186,18 @@ def focus_direction(d: str) -> None:
         raise Unsupported("moving focus by direction is only available on Hyprland")
 
 
+def close_window() -> None:
+    """Closes the focused window, with all its tabs. Apps with something still
+    running (kitty with a session, a browser) ask to confirm first."""
+    if HYPRLAND:
+        app = active_app()
+        if not app or app.startswith("voxbutton"):
+            raise Unsupported("no app window in focus")
+        _hypr("hl.dsp.window.close()")  # acts on the active window, which is the one checked above
+    else:
+        key("alt+F4")
+
+
 def open_terminal(cmd: list[str]) -> None:
     """Opens a new terminal window running `cmd` in the home folder: kitty
     when it's there, else another known terminal; Windows Terminal on Windows."""

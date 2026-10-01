@@ -121,7 +121,7 @@ a phone through Moonlight.
 | `tab 3` | alt+3 (browsers) |
 | `workspace 2` | switch Hyprland workspace |
 | `window left` / `focus right` | move focus between windows |
-| `enter`, `send` | Return |
+| `enter`, `send`, `yes` | Return |
 | `escape`, `cancel`, `stop` | Escape |
 | `delete that` | erase the last dictation |
 | `clear line`, `backspace` | |
@@ -130,6 +130,7 @@ a phone through Moonlight.
 | `go back`, `go forward`, `reload` | browser navigation |
 | `up`, `down`, `left`, `right` | arrow keys |
 | `option 2` | types "2" (Claude Code menus) |
+| `kill all tabs` | close the focused window with all its tabs; kitty/browsers ask first, say `yes` |
 | `open claude code` | new kitty window running Claude Code (Windows: Windows Terminal) |
 | `type <anything>` | types the rest verbatim |
 
