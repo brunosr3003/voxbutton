@@ -213,7 +213,8 @@ final class App: NSObject, NSApplicationDelegate {
     /// Voice command: record until the first pause, send it, stop. Gives up
     /// after 8 s without speech.
     func listenOnce(pause: Double) {
-        let l = Listener(pause: pause, chunk: 15) { [weak self] wav in
+        // Commands are short: past 4 s of speech it goes anyway, cut between words.
+        let l = Listener(pause: pause, chunk: 4) { [weak self] wav in
             DispatchQueue.main.async {
                 guard let self, self.onceActive else { return }
                 self.onceActive = false
@@ -378,6 +379,16 @@ final class Listener {
     private var frames: [(end: Int, level: Float)] = []  // per buffer in `current`
     private var talking = false
     private var quiet = 0.0
+    // The room sets the bar: speech starts well above its background noise and
+    // ends when the level falls back near it (or far below your own peak), so
+    // a noisy room doesn't keep a segment open forever.
+    private var floorLevels: [Float] = []  // recent levels while nobody talks
+    private var peak: Float = -120
+
+    private var noiseFloor: Float {
+        guard !floorLevels.isEmpty else { return -60 }
+        return floorLevels.sorted()[floorLevels.count / 2]
+    }
 
     init(pause: Double, chunk: Double, onSegment: @escaping (Data) -> Void) {
         self.pause = pause
@@ -431,18 +442,23 @@ final class Listener {
         if talking {
             current.append(bytes)
             frames.append((current.count, level))
-            quiet = level < Self.speech ? quiet + Double(n) / target.sampleRate : 0
+            peak = max(peak, level)
+            let quietBelow = max(Self.speech, noiseFloor + 6, peak - 20)
+            quiet = level < quietBelow ? quiet + Double(n) / target.sampleRate : 0
             if quiet >= pause {
                 send(upTo: current.count)
             } else if Double(current.count) / Self.bytesPerSecond >= chunk {
                 send(upTo: quietestCut())
             }
-        } else if level >= Self.speech {
+        } else if level >= max(Self.speech, noiseFloor + 10) {
             talking = true
             quiet = 0
+            peak = level
             current = ring + bytes
             frames = [(ring.count, -120), (current.count, level)]
         } else {
+            floorLevels.append(level)
+            if floorLevels.count > 24 { floorLevels.removeFirst() }  // ~1.5 s
             ring.append(bytes)
             let keep = Int(Self.preroll * Self.bytesPerSecond) & ~1
             if ring.count > keep { ring = ring.suffix(keep) }

@@ -222,7 +222,7 @@ final class Agent: ObservableObject {
                 await self.send(pcm, segment: false)
             }
         }
-        capture.listen(pause: pause, chunk: 15)
+        capture.listen(pause: pause, chunk: 4)  // commands are short: 4 s of speech at most
         onceActive = true
         listening = true
         recording = true
@@ -347,6 +347,15 @@ final class Capture: @unchecked Sendable {
     private var quiet = 0.0
     private var pause = 0.6
     private var chunk = 6.0
+    // Speech starts well above the room's background noise and ends when the
+    // level falls back near it (or far below your own peak).
+    private var floorLevels: [Float] = []
+    private var peak: Float = -120
+
+    private var noiseFloor: Float {
+        guard !floorLevels.isEmpty else { return -60 }
+        return floorLevels.sorted()[floorLevels.count / 2]
+    }
     var onSegment: ((Data) -> Void)?
 
     var active: Bool { lock.withLock { mode != 0 } }
@@ -396,7 +405,8 @@ final class Capture: @unchecked Sendable {
                 if talking {
                     data.append(d)
                     frames.append((data.count, level))
-                    quiet = level < Self.speech ? quiet + seconds : 0
+                    peak = max(peak, level)
+                    quiet = level < max(Self.speech, noiseFloor + 6, peak - 20) ? quiet + seconds : 0
                     if quiet >= pause {
                         ready = take(upTo: data.count)
                     } else if Double(data.count) / Self.bytesPerSecond >= chunk {
@@ -405,12 +415,15 @@ final class Capture: @unchecked Sendable {
                             .min { $0.level < $1.level }?.end ?? data.count
                         ready = take(upTo: cut)
                     }
-                } else if level >= Self.speech {
+                } else if level >= max(Self.speech, noiseFloor + 10) {
                     talking = true
                     quiet = 0
+                    peak = level
                     data = ring + d
                     frames = [(ring.count, -120), (data.count, level)]
                 } else {
+                    floorLevels.append(level)
+                    if floorLevels.count > 24 { floorLevels.removeFirst() }
                     ring.append(d)
                     let keep = Int(Self.preroll * Self.bytesPerSecond) & ~1
                     if ring.count > keep { ring = ring.suffix(keep) }
