@@ -135,6 +135,8 @@ class Button(Gtk.ApplicationWindow):
         self.state = "offline"
         self.mode = "chat"
         self.record_mode = "toggle"
+        self.correction_seen: int | None = None  # None until the first poll
+        self.correction_proc: subprocess.Popen | None = None
         self.flash_until = 0.0
         self.flash_kind = ""
         self.set_decorated(False)
@@ -291,10 +293,25 @@ class Button(Gtk.ApplicationWindow):
             self.state = s["state"] if s.get("agent") or s["state"] != "idle" else "offline"
             self.mode = s.get("mode", "chat")
             self.record_mode = s.get("record_mode", self.record_mode)
+            self.show_correction(s.get("correction") or {})
             if s.get("flash"):
                 self.flash(s["flash"])
         self.area.queue_draw()
         return False
+
+    def show_correction(self, c: dict) -> None:
+        cid = c.get("id", 0)
+        if self.correction_seen is None:  # don't replay the last one on startup
+            self.correction_seen = cid
+            return
+        if cid == self.correction_seen or not c.get("corrected"):
+            return
+        self.correction_seen = cid
+        if self.correction_proc and self.correction_proc.poll() is None:
+            self.correction_proc.terminate()
+        script = Path(__file__).with_name("voxbutton-correction.py")
+        self.correction_proc = subprocess.Popen([sys.executable, str(script), c["original"], c["corrected"]],
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def flash(self, kind: str) -> None:
         if kind != self.flash_kind or time.time() > self.flash_until:

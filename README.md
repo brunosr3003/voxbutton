@@ -73,6 +73,8 @@ Everything lives in one folder: `~/.config/voxbutton/` on Linux,
 | `trust` | `[]` | IPs accepted without the token, e.g. a phone's Tailscale address |
 | `public_url` | `""` | HTTPS address shown in settings for devices outside the tailnet |
 | `type` | `true` | `false` only returns the text |
+| `corrector` | `false` | show a corrected version of your English (see below) |
+| `corrector_model` | `qwen2.5:3b` | the Ollama model for it |
 
 For example:
 
@@ -143,6 +145,24 @@ For Hyprland autostart, next to the server:
 ```lua
 hl.exec_cmd("/path/to/voxbutton/linux/voxbutton-button.py")
 ```
+
+## English corrector
+
+Optional, for non-native speakers: after each dictation, a card at the bottom of
+the screen shows what you said and a corrected, more natural version. What gets
+typed doesn't change; the card is only there to read, and it never takes focus.
+Turn it on with the switch in settings → General, or `"corrector": true` in
+`server.json`.
+
+It runs a small local model through [Ollama](https://ollama.com) on the same
+GPU (about 2.5 GB of VRAM, 0.1–0.2 s per sentence once loaded; it unloads after
+15 idle minutes and is warmed up again as soon as you start dictating):
+
+```sh
+ollama pull qwen2.5:3b        # the default; any Ollama model works ("corrector_model")
+```
+
+`corrector_url` points elsewhere if Ollama isn't on `127.0.0.1:11434`.
 
 ## Mic agent (Linux and Windows)
 

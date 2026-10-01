@@ -136,6 +136,8 @@ class Button:
         self.root, self.client = root, client
         self.state, self.mode, self.record_mode = "offline", "chat", "toggle"
         self.talking = False
+        self.correction_seen: int | None = None
+        self.correction_win: tk.Toplevel | None = None
         self.flash_kind, self.flash_until = "", 0.0
         self.settings: Settings | None = None
         self.press: tuple[int, int, int, int] | None = None
@@ -253,8 +255,39 @@ class Button:
             self.state = s["state"] if s.get("agent") or s["state"] != "idle" else "offline"
             self.mode = s.get("mode", "chat")
             self.record_mode = s.get("record_mode", self.record_mode)
+            self.show_correction(s.get("correction") or {})
             if s.get("flash"):
                 self.flash(s["flash"])
+
+    def show_correction(self, c: dict):
+        cid = c.get("id", 0)
+        if self.correction_seen is None:  # don't replay the last one on startup
+            self.correction_seen = cid
+            return
+        if cid == self.correction_seen or not c.get("corrected"):
+            return
+        self.correction_seen = cid
+        if self.correction_win and self.correction_win.winfo_exists():
+            self.correction_win.destroy()
+        w = tk.Toplevel(self.root, bg="#18181b")
+        w.overrideredirect(True)
+        w.attributes("-topmost", True)
+        width = 720
+        for text, color, font in (("YOU SAID", "#7a7a80", ("TkDefaultFont", 8, "bold")),
+                                  (c["original"], "#b8b8be", ("TkDefaultFont", 10)),
+                                  ("BETTER", "#57e389", ("TkDefaultFont", 8, "bold")),
+                                  (c["corrected"], "#ffffff", ("TkDefaultFont", 12, "bold"))):
+            tk.Label(w, text=text, fg=color, bg="#18181b", font=font, wraplength=width - 36, justify="left",
+                     anchor="w").pack(fill="x", padx=18, pady=(8 if text in ("YOU SAID", "BETTER") else 0, 0))
+        tk.Frame(w, height=12, bg="#18181b").pack()
+        w.update_idletasks()
+        x = (w.winfo_screenwidth() - width) // 2
+        y = w.winfo_screenheight() - w.winfo_reqheight() - 80
+        w.geometry(f"{width}x{w.winfo_reqheight()}+{x}+{y}")
+        if WIN:
+            no_activate(w)
+        w.after(10000, lambda: w.winfo_exists() and w.destroy())
+        self.correction_win = w
 
     def flash(self, kind: str):
         if kind != self.flash_kind or time.time() > self.flash_until:
@@ -420,6 +453,18 @@ class Settings:
         self.auto_hint = tk.StringVar(value=autostart.describe())
         ttk.Label(f, textvariable=self.auto_hint, foreground="#777", wraplength=580).pack(anchor="w")
 
+        self.heading(f, "English corrector")
+        self.corr = tk.BooleanVar(value=False)
+        self.corr_model = tk.StringVar()
+        ttk.Checkbutton(f, text="Show a better version after each dictation", variable=self.corr).pack(anchor="w")
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=2)
+        ttk.Label(row, text="Model (Ollama)", width=16).pack(side="left")
+        ttk.Entry(row, textvariable=self.corr_model, width=24).pack(side="left")
+        ttk.Label(f, wraplength=580, foreground="#777", text=(
+            "A card at the bottom of the screen shows what you said and a corrected version; what gets "
+            "typed doesn't change.")).pack(anchor="w")
+
         self.heading(f, "Transcription")
         self.model = tk.StringVar()
         self.langs = tk.StringVar()
@@ -480,6 +525,8 @@ class Settings:
             self.model.set(s.get("model", ""))
             self.langs.set(",".join(s.get("languages") or []))
             self.level.set(s.get("min_level", -34))
+            self.corr.set(bool(s.get("corrector")))
+            self.corr_model.set(s.get("corrector_model", ""))
             self.pause.set(s.get("listen_pause", 0.6))
             self.chunk.set(s.get("listen_chunk", 6))
             self.rec_mode.set(dict(RECORD_MODES).get(s.get("record_mode"), RECORD_MODES[0][1]))
@@ -502,7 +549,8 @@ class Settings:
         mode = next((m for m, d in RECORD_MODES if d == self.rec_mode.get()), "toggle")
         r = self.client.call("POST", "/config", {
             "languages": [l.strip() for l in self.langs.get().split(",") if l.strip()], "min_level": level,
-            "record_mode": mode, "listen_pause": float(self.pause.get()), "listen_chunk": float(self.chunk.get())})
+            "record_mode": mode, "listen_pause": float(self.pause.get()), "listen_chunk": float(self.chunk.get()),
+            "corrector": bool(self.corr.get()), "corrector_model": self.corr_model.get().strip()})
         self.saved.set("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 
 

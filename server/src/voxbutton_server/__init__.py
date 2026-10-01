@@ -18,6 +18,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import urllib.request
 from urllib.parse import parse_qs, urlsplit
 
 from voxbutton_server import commands, platform
@@ -46,6 +47,9 @@ DEFAULTS = {
     "record_mode": "toggle",  # toggle: click/click · hold: push-to-talk · always: keeps listening
     "listen_pause": 0.6,  # always on: seconds of quiet that send what you said
     "listen_chunk": 6.0,  # always on: while you keep talking, send about this often (seconds)
+    "corrector": False,  # show a corrected version of your English after each dictation
+    "corrector_model": "qwen2.5:3b",  # an Ollama model
+    "corrector_url": "http://127.0.0.1:11434",  # where Ollama listens
 }
 RECORD_MODES = ("toggle", "hold", "always")
 
@@ -181,6 +185,51 @@ class Transcriber:
         return text, info.language
 
 
+class Corrector:
+    """Rewrites dictated text as natural English with a local model (Ollama),
+    to be shown next to what you said. Nothing it returns is ever typed."""
+
+    SYSTEM = ("You fix the English of a non-native speaker who dictated this text by voice. Rewrite it as "
+              "clear, natural, correct English with the same meaning, tone and person. Keep technical terms, "
+              "names, code and commands exactly as they are. Do not add anything, answer questions, or "
+              "explain. Reply with only the corrected text.")
+
+    def __init__(self, enabled: bool, model: str, url: str):
+        self.enabled, self.model, self.url = enabled, model, url.rstrip("/")
+
+    def _post(self, path: str, body: dict, timeout: float) -> dict:
+        req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+
+    def warm(self) -> None:
+        """Loads the model in the background, so it's ready when you finish talking."""
+        if self.enabled:
+            threading.Thread(target=lambda: self._try(self._post, "/api/generate",
+                                                      {"model": self.model, "prompt": ""}, 120), daemon=True).start()
+
+    @staticmethod
+    def _try(fn, *args):
+        try:
+            return fn(*args)
+        except (OSError, ValueError) as e:
+            log(f"corrector: {e}")
+            return None
+
+    def correct(self, text: str) -> str | None:
+        r = self._try(self._post, "/api/chat", {
+            "model": self.model, "stream": False, "options": {"temperature": 0.2},
+            "messages": [{"role": "system", "content": self.SYSTEM}, {"role": "user", "content": text}],
+        }, 120)
+        return ((r or {}).get("message") or {}).get("content", "").strip().strip('"') or None
+
+    @staticmethod
+    def same(a: str, b: str) -> bool:
+        norm = lambda t: re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+        return norm(a) == norm(b)
+
+
 class StreamWatcher:
     """Finds the device you're streaming to (Moonlight over Tailscale): it's the
     Tailscale peer this machine is sending video to, megabits per second, while
@@ -243,6 +292,7 @@ class Remote:
         self.state = "idle"  # idle | recording | busy | listening
         self.record_mode = "toggle"
         self.command_next = False  # always on: the next piece runs as a command
+        self.correction = {"id": 0, "original": "", "corrected": ""}  # latest, for the button to show
         self.listen = {"pause": 0.6, "chunk": 6.0}  # sent to agents along with "listen"
         self.since = time.time()
         self.agents: dict[str, dict] = {}  # name -> {"seen", "prio", "gen"}
@@ -369,6 +419,7 @@ class Remote:
                 "mic": self.active if self.state != "idle" else self._best(),
                 "mode": "command" if self.command_next else self.mode,
                 "record_mode": self.record_mode,
+                "correction": self.correction,
                 "flash": kind if now - at < 1.2 else "",
             }
 
@@ -378,7 +429,7 @@ def log(msg: str) -> None:
 
 
 def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: bool, trusted: set[str],
-                 urls: dict[str, str]):
+                 urls: dict[str, str], corrector: Corrector):
     last = {"typed": 0}  # length of the last dictation, for the "delete that" command
 
     class Handler(BaseHTTPRequestHandler):
@@ -427,6 +478,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         "record_mode": remote.record_mode,
                         "listen_pause": remote.listen["pause"],
                         "listen_chunk": remote.listen["chunk"],
+                        "corrector": corrector.enabled,
+                        "corrector_model": corrector.model,
                     },
                     "connect": {**urls, "token": token},
                     "commands": commands.CATALOG,
@@ -460,6 +513,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                     remote.stop()
                     err = ""
                 else:
+                    if mode == "chat" and remote.state == "idle":
+                        corrector.warm()
                     err = (remote.start if path == "/record/start" else remote.toggle)(mode)
                 return self.reply(503 if err else 200, {"error": err} if err else remote.snapshot())
             if path == "/config":
@@ -476,13 +531,19 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         remote.record_mode = body["record_mode"]
                     if "listen_pause" in body:
                         remote.listen["pause"] = min(max(float(body["listen_pause"]), 0.2), 3.0)
+                    if "corrector" in body:
+                        corrector.enabled = bool(body["corrector"])
+                        corrector.warm()
+                    if body.get("corrector_model"):
+                        corrector.model = str(body["corrector_model"]).strip()
                     if "listen_chunk" in body:
                         remote.listen["chunk"] = min(max(float(body["listen_chunk"]), 2.0), 30.0)
                 except (ValueError, TypeError, AttributeError) as e:
                     return self.reply(400, {"error": str(e)})
                 save_config({"languages": transcribe.languages, "min_level": transcribe.min_level,
                              "record_mode": remote.record_mode, "listen_pause": remote.listen["pause"],
-                             "listen_chunk": remote.listen["chunk"]})
+                             "listen_chunk": remote.listen["chunk"], "corrector": corrector.enabled,
+                             "corrector_model": corrector.model})
                 log(f"settings: languages={transcribe.languages} min_level={transcribe.min_level} "
                     f"record_mode={remote.record_mode}")
                 return self.reply(200, {"ok": True})
@@ -560,6 +621,17 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                     return self.reply(500, {"error": f"wtype failed: {e}", "text": text})
             self.finished(bool(text))
             self.reply(200, {"text": text, "language": lang, "typed": typed})
+            if text and corrector.enabled and len(text.split()) >= 2:
+                threading.Thread(target=self.correct, args=(text,), daemon=True).start()
+
+        def correct(self, text: str) -> None:
+            t = time.time()
+            better = corrector.correct(text)
+            if not better or corrector.same(text, better):
+                return
+            log(f"  corrected in {time.time() - t:.2f}s: {better!r}")
+            with remote.cond:
+                remote.correction = {"id": remote.correction["id"] + 1, "original": text, "corrected": better}
 
     return Handler
 
@@ -613,8 +685,9 @@ def main() -> None:
     remote = Remote(StreamWatcher())
     remote.record_mode = cfg["record_mode"] if cfg["record_mode"] in RECORD_MODES else "toggle"
     remote.listen = {"pause": float(cfg["listen_pause"]), "chunk": float(cfg["listen_chunk"])}
+    corrector = Corrector(bool(cfg["corrector"]), cfg["corrector_model"], cfg["corrector_url"])
     handler = make_handler(transcriber, remote, token, cfg["type"], set(cfg["trust"]),
-                           {"local": f"http://{host}:{cfg['port']}", "public": cfg["public_url"]})
+                           {"local": f"http://{host}:{cfg['port']}", "public": cfg["public_url"]}, corrector)
     server = ThreadingHTTPServer((host, int(cfg["port"])), handler)
     log(f"listening on http://{host}:{cfg['port']} ({platform.KIND}; config in {CONFIG_DIR})")
     try:

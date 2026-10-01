@@ -191,6 +191,21 @@ class Settings(Gtk.ApplicationWindow):
         page.append(rec)
 
         page.append(Gtk.Separator(margin_top=8))
+        page.append(label("English corrector", "title"))
+        corr = Gtk.Grid(column_spacing=14, row_spacing=10)
+        self.corrector = Gtk.Switch(halign=Gtk.Align.START)
+        self.corrector_model = Gtk.Entry(hexpand=True)
+        corr.attach(label("Show a better version"), 0, 0, 1, 1)
+        corr.attach(self.corrector, 1, 0, 1, 1)
+        corr.attach(label("After each dictation, a card at the bottom of the screen shows what you said and a "
+                          "corrected, more natural version. What gets typed doesn't change.", "dim", wrap=True),
+                    1, 1, 1, 1)
+        corr.attach(label("Model"), 0, 2, 1, 1)
+        corr.attach(self.corrector_model, 1, 2, 1, 1)
+        corr.attach(label("A local Ollama model; it runs on this computer's GPU.", "dim", wrap=True), 1, 3, 1, 1)
+        page.append(corr)
+
+        page.append(Gtk.Separator(margin_top=8))
         page.append(label("Transcription", "title"))
         grid = Gtk.Grid(column_spacing=14, row_spacing=10)
         self.model_label = label("", "mono")
@@ -290,6 +305,8 @@ class Settings(Gtk.ApplicationWindow):
             self.langs.set_text(",".join(s.get("languages") or []))
             self.min_level.set_value(s.get("min_level", -34))
             modes = [m for m, _ in RECORD_MODES]
+            self.corrector.set_active(bool(s.get("corrector")))
+            self.corrector_model.set_text(s.get("corrector_model", ""))
             self.pause.set_value(s.get("listen_pause", 0.6))
             self.chunk.set_value(s.get("listen_chunk", 6))
             self.record_mode.set_selected(modes.index(s.get("record_mode", "toggle"))
@@ -311,7 +328,8 @@ class Settings(Gtk.ApplicationWindow):
         body = {"languages": [l for l in self.langs.get_text().split(",") if l.strip()],
                 "min_level": self.min_level.get_value(),
                 "record_mode": RECORD_MODES[self.record_mode.get_selected()][0],
-                "listen_pause": self.pause.get_value(), "listen_chunk": self.chunk.get_value()}
+                "listen_pause": self.pause.get_value(), "listen_chunk": self.chunk.get_value(),
+                "corrector": self.corrector.get_active(), "corrector_model": self.corrector_model.get_text().strip()}
         r = api(self.server, self.token, "POST", "/config", body)
         self.save_status.set_text("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 
