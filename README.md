@@ -123,6 +123,7 @@ records a **voice command** instead (the button turns blue while it listens):
 | `go back`, `go forward`, `reload` | browser navigation |
 | `up`, `down`, `left`, `right` | arrow keys |
 | `option 2` | types "2" (Claude Code menus) |
+| `open claude code` | new kitty window running Claude Code (Windows: Windows Terminal) |
 | `type <anything>` | types the rest verbatim |
 
 Add `N times` to repeat (`next tab 3 times`). Commands are English only. They

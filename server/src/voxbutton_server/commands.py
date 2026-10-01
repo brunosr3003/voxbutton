@@ -197,6 +197,17 @@ def _(m, c):
     type_text(m.group(1))
 
 
+CLAUDE = r"(?:claude|cloud|clod|clawed|claud|cloude)"
+
+
+@command("open claude code",
+         rf"(?:open|new|start|launch|run)(?: up)?(?: a| the)?(?: new)? {CLAUDE}(?: code)?"
+         r"(?: (?:in|on|with)(?: a| the)? (?:kitty|kiddy|kitties|terminal|new terminal|new window))?",
+         say=["open claude code", "new claude in kitty"], does="Open Claude Code in a new terminal (kitty)")
+def _(m, c):
+    platform.open_terminal(["claude"])
+
+
 @command("tab key", r"tab key", r"press tab", say=['tab key', 'press tab'], does='Press Tab')
 def _(m, c):
     key("Tab", c.times)

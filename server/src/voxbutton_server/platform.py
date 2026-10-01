@@ -184,3 +184,28 @@ def focus_direction(d: str) -> None:
         _hypr(f'hl.dsp.focus({{ direction = "{d}" }})')
     else:
         raise Unsupported("moving focus by direction is only available on Hyprland")
+
+
+def open_terminal(cmd: list[str]) -> None:
+    """Opens a new terminal window running `cmd` in the home folder: kitty
+    when it's there, else another known terminal; Windows Terminal on Windows."""
+    home = os.path.expanduser("~")
+    if KIND == "windows":
+        if shutil.which("wt"):
+            args = ["wt", "-d", home, *cmd]
+        else:
+            args = ["cmd", "/c", "start", "", "/d", home, *cmd]
+        subprocess.Popen(args, creationflags=0x00000008)  # DETACHED_PROCESS
+        return
+    for term, prefix in (("kitty", ["--directory", home]), ("alacritty", ["--working-directory", home, "-e"]),
+                         ("foot", ["--working-directory", home]), ("wezterm", ["start", "--cwd", home, "--"]),
+                         ("gnome-terminal", ["--working-directory", home, "--"]), ("konsole", ["--workdir", home, "-e"]),
+                         ("xterm", ["-e"])):
+        if shutil.which(term):
+            break
+    else:
+        raise Unsupported("no terminal emulator found")
+    env = dict(os.environ)
+    env["PATH"] = os.path.join(home, ".local", "bin") + os.pathsep + env.get("PATH", "")
+    subprocess.Popen([term, *prefix, *cmd], env=env, cwd=home, start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
