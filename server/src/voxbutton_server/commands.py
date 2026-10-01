@@ -44,7 +44,7 @@ def normalize(text: str) -> str:
 class Ctx:
     app: str  # focused window's class, lowercased
     times: int  # from "... 3 times"
-    last_typed: int  # characters of the last dictation, for "delete that"
+    last: dict  # {"text": the last dictation as typed}, shared with the server; commands update it
 
     @property
     def terminal(self) -> bool:
@@ -127,9 +127,10 @@ def _(m, c):
 
 @command("delete that", r"(?:delete|undo|erase|scratch)(?: that| this| it)?", say=['delete that', 'undo that'], does='Erase the last dictation')
 def _(m, c):
-    if not c.last_typed:
+    if not c.last.get("text"):
         raise LookupError("nothing dictated to delete")
-    key("BackSpace", c.last_typed)
+    key("BackSpace", len(c.last["text"]))
+    c.last["text"] = ""
 
 
 @command("clear line", r"clear(?: the)? line", say=['clear line'], does='Clear the current line')
@@ -141,7 +142,22 @@ def _(m, c):
         key("BackSpace")
 
 
-@command("backspace", r"backspace", r"back space", say=['backspace'], does='Press Backspace')
+@command("backspace", r"backspace", r"back space", r"delete(?: the)? (?:last )?word",
+         say=["backspace", "delete word"], does="Erase the last word")
+def _(m, c):
+    for _ in range(c.times):
+        text = c.last.get("text", "")
+        if word := re.search(r"\S+\s*$", text):
+            # Erase exactly the last dictated word and the space after it.
+            key("BackSpace", len(word.group(0)))
+            c.last["text"] = text[: word.start()]
+        else:
+            # Nothing dictated to go by: the app's own "previous word" key.
+            key("ctrl+w" if c.terminal else "ctrl+BackSpace")
+
+
+@command("press backspace", r"press backspace", r"backspace key", r"delete(?: one| a)? (?:letter|character)",
+         say=["press backspace"], does="Press Backspace once (one letter)")
 def _(m, c):
     key("BackSpace", c.times)
 
@@ -231,7 +247,7 @@ TYPE = re.compile(r"^(?:type|write)\s+(.+)$", re.I | re.S)
 SPLIT = re.compile(r"\s*(?:[,;.!?]+|\band then\b|\bthen\b|\band\b)\s*", re.I)
 
 
-def _one(raw: str, last_typed: int, dry: bool) -> str:
+def _one(raw: str, last: dict, dry: bool) -> str:
     # "type ..." keeps the original casing and accents.
     stripped = re.sub(r"^[^\w]+", "", raw)
     if m := TYPE.match(stripped):
@@ -243,7 +259,7 @@ def _one(raw: str, last_typed: int, dry: bool) -> str:
     times = 1
     if m := REPEAT.match(t):
         t, times = m.group(1), min(int(m.group(2)), 20)
-    ctx = Ctx(app=platform.active_app() if not dry else "", times=times, last_typed=last_typed)
+    ctx = Ctx(app=platform.active_app() if not dry else "", times=times, last=last)
     for name, pat, fn in COMMANDS:
         if m := pat.match(t):
             if not dry:
@@ -252,26 +268,25 @@ def _one(raw: str, last_typed: int, dry: bool) -> str:
     raise LookupError(f"unknown command: {t!r}")
 
 
-def run(text: str, last_typed: int = 0, dry: bool = False) -> str:
+def run(text: str, last: dict | None = None, dry: bool = False) -> str:
     """Runs the command(s) in `text` and returns their names. Several can be
     chained ("up, down, send", "next tab then send"); they're all matched
     before any runs, so a half-understood sentence does nothing. Raises
     LookupError when something doesn't match or doesn't apply here."""
+    last = {"text": ""} if last is None else last
     raw = text.strip()
     try:
-        return _one(raw, last_typed, dry)
+        return _one(raw, last, dry)
     except LookupError:
         parts = [p for p in SPLIT.split(raw) if p.strip()]
         if len(parts) < 2 or TYPE.match(re.sub(r"^[^\w]+", "", raw)):
             raise
     for p in parts:
-        _one(p, last_typed, dry=True)  # raises on the first unknown part
+        _one(p, last, dry=True)  # raises on the first unknown part
     names = []
     for p in parts:
         try:
-            names.append(_one(p, last_typed, dry))
+            names.append(_one(p, last, dry))
         except LookupError:
             continue  # matched but doesn't apply right now, e.g. a second "delete that"
-        if names[-1] == "delete that":
-            last_typed = 0
     return " + ".join(names) or "nothing"

@@ -443,7 +443,7 @@ def log(msg: str) -> None:
 
 def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: bool, trusted: set[str],
                  urls: dict[str, str], corrector: Corrector):
-    last = {"typed": 0}  # length of the last dictation, for the "delete that" command
+    last = {"text": ""}  # the last dictation as typed, for "delete that" / "backspace"
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -619,14 +619,12 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                     return self.reply(200, {"text": "", "command": None})
                 try:
                     dry = not do_type or self.headers.get("X-Type") == "0"
-                    name = commands.run(text, last["typed"], dry=dry)
+                    name = commands.run(text, last, dry=dry)
                 except (LookupError, OSError, subprocess.SubprocessError) as e:
                     log(f"  command failed: {e}")
                     self.finished(False)
                     return self.reply(200, {"text": text, "command": None, "error": str(e)})
                 log(f"  → {name}")
-                if name == "delete that":
-                    last["typed"] = 0
                 self.finished(True)
                 return self.reply(200, {"text": text, "command": name})
             typed = False
@@ -635,7 +633,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                     # Trailing space so consecutive dictations don't glue together.
                     type_text(text + " ")
                     typed = True
-                    last["typed"] = len(text) + 1
+                    last["text"] = text + " "
                 except (OSError, subprocess.SubprocessError) as e:
                     log(f"wtype failed: {e}")
                     self.finished(False)

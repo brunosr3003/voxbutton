@@ -89,7 +89,9 @@ what you said.
 | `enter`, `send`, `yes`, `confirm` | Enter |
 | `escape`, `cancel`, `stop` | Escape (interrupts Claude Code) |
 | `delete that`, `delete`, `undo` | erase the last dictation |
-| `clear line`, `backspace` | |
+| `backspace`, `delete word` | erase the last word (repeat to keep going back word by word) |
+| `press backspace` | one Backspace (a single letter) |
+| `clear line` | |
 | `scroll up` / `scroll down` | Page Up/Down (shift+ in terminals) |
 | `copy`, `paste`, `select all` | per app |
 | `go back`, `go forward`, `reload` | browser navigation |
