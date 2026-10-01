@@ -44,6 +44,7 @@ DEFAULTS = {
     "trust": [],  # IPs allowed without the token, e.g. a phone's Tailscale address
     "public_url": "",  # HTTPS address for devices outside the tailnet, shown in settings
     "type": True,  # type the text; false only returns it
+    "typing": "auto",  # how: auto, wtype, uinput (any Wayland, incl. GNOME/KDE) or xdotool
     "record_mode": "toggle",  # toggle: click/click · hold: push-to-talk · always: keeps listening
     "listen_pause": 0.6,  # always on: seconds of quiet that send what you said
     "listen_chunk": 6.0,  # always on: while you keep talking, send about this often (seconds)
@@ -703,8 +704,9 @@ def main() -> None:
         print(json.dumps(cfg, indent=2))
         return
 
+    platform.configure(cfg["typing"])
     if cfg["type"] and (tool := platform.missing_tool()):
-        sys.exit(f"{tool} not found: install it (e.g. `sudo pacman -S {tool}`) or set \"type\": false")
+        sys.exit(f"typing needs {tool}; install it, change \"typing\", or set \"type\": false")
 
     host = cfg["host"] or tailscale_ip() or "127.0.0.1"
     transcriber = Transcriber(cfg["model"], cfg["device"], cfg["compute_type"], cfg["language"] or None,
@@ -717,7 +719,8 @@ def main() -> None:
     handler = make_handler(transcriber, remote, token, cfg["type"], set(cfg["trust"]),
                            {"local": f"http://{host}:{cfg['port']}", "public": cfg["public_url"]}, corrector)
     server = ThreadingHTTPServer((host, int(cfg["port"])), handler)
-    log(f"listening on http://{host}:{cfg['port']} ({platform.KIND}; config in {CONFIG_DIR})")
+    log(f"listening on http://{host}:{cfg['port']} ({platform.KIND}, types with {platform.TYPING}; "
+        f"config in {CONFIG_DIR})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

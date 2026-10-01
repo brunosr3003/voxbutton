@@ -84,8 +84,8 @@ what you said.
 | `tab 3` | alt+3 (browsers), ctrl+alt+3 (Windows Terminal) |
 | `kill all tabs` | closes the focused window with all its tabs; kitty and browsers ask first, say `yes` |
 | `open claude code` | new terminal window running Claude Code (kitty when installed; Windows Terminal on Windows) |
-| `workspace 2` | switch workspace (Hyprland, X11) |
-| `window left` / `focus right` | move focus between windows (Hyprland) |
+| `workspace 2` | switch workspace (Hyprland, Sway, KDE with kdotool, X11) |
+| `window left` / `focus right` | move focus between windows (Hyprland, Sway) |
 | `enter`, `send`, `yes`, `confirm` | Enter |
 | `escape`, `cancel`, `stop` | Escape (interrupts Claude Code) |
 | `delete that`, `delete`, `undo` | erase the last dictation |
@@ -143,15 +143,37 @@ Whisper model (~1.6 GB) and creates the auth token.
 | desktop | types with | widget | start it |
 |---|---|---|---|
 | Hyprland | `wtype` (`sudo pacman -S wtype`) | `linux/voxbutton-button.py` (GTK 4) | `linux/voxbutton-session.sh` |
-| X11 (GNOME/KDE on Xorg, i3…) | `xdotool` | `desktop/voxbutton_tk.py` (Tk) | `linux/start-x11.sh` |
+| GNOME, KDE Plasma (Wayland) | built-in uinput keyboard | `desktop/voxbutton_tk.py` (Tk, via XWayland) | `linux/start-desktop.sh` |
+| Sway, niri, other wlroots | `wtype` | `desktop/voxbutton_tk.py` (Tk, via XWayland) | `linux/start-desktop.sh` |
+| X11 (Xorg, i3, Xfce…) | `xdotool` | `desktop/voxbutton_tk.py` (Tk) | `linux/start-desktop.sh` |
 | Windows 10/11 | built-in (SendInput) | `desktop/voxbutton_tk.py` (Tk) | `windows\start.bat` |
+
+**GNOME and KDE on Wayland** don't accept `wtype`'s virtual-keyboard protocol,
+so voxbutton types through its own virtual keyboard on `/dev/uinput`. That
+works under any compositor and needs no packages, only write access to
+`/dev/uinput`. Many distros give it to the logged-in user. If yours doesn't,
+add a udev rule once and log in again:
+
+```sh
+echo 'KERNEL=="uinput", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/70-voxbutton-uinput.rules
+```
+
+It types the US layout: letters, digits and space are the same on most
+layouts, while some punctuation may differ on others. Accents and curly quotes are
+simplified (é → e). `"typing"` in `server.json` forces a method (`wtype`,
+`uinput`, `xdotool`). Which app is focused (for per-app keys) comes from
+`hyprctl`, `swaymsg`, [`kdotool`](https://github.com/jinliu/kdotool) on KDE, or
+`xdotool`. GNOME has no way to ask, so commands use the generic keys there.
+`workspace N` works on Hyprland, Sway, KDE (with kdotool) and X11. `window left`
+works on Hyprland and Sway.
 
 **Start with the computer:** switch it on in settings → General, or run
 `desktop/autostart.py on`. On Hyprland that's a systemd user service
 (`voxbutton.service`) that waits for the session and then starts the server and
 the widget. Your Hyprland config is left alone, because saving it makes
-Hyprland reload. On Windows it's a shortcut in the Startup folder; elsewhere,
-an XDG autostart entry.
+Hyprland reload. On Windows it's a shortcut in the Startup folder. On GNOME,
+KDE, Sway and X11 desktops it's an XDG autostart entry running
+`linux/start-desktop.sh`.
 
 The Hyprland widget registers its own window rules at runtime (float, pin, no
 focus on open or on hover). It can't use Hyprland's `no_focus`, because windows
@@ -192,6 +214,7 @@ Everything lives in one folder: `~/.config/voxbutton/` on Linux,
 | `trust` | `[]` | IPs accepted without the token, e.g. a phone's Tailscale address |
 | `public_url` | `""` | HTTPS address shown in settings for devices outside the tailnet |
 | `type` | `true` | `false` only returns the text |
+| `typing` | `auto` | how to type: `wtype`, `uinput` (any Wayland, incl. GNOME/KDE), `xdotool` |
 
 For example:
 

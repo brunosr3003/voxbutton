@@ -104,12 +104,12 @@ def _(m, c):
     key("ctrl+shift+q" if c.terminal else "ctrl+w")
 
 
-@command("workspace", r"(?:go to |switch to )?(?:workspace|desktop|screen) (\d+)", say=['workspace 2', 'go to workspace 2'], does='Switch workspace (Hyprland, X11)')
+@command("workspace", r"(?:go to |switch to )?(?:workspace|desktop|screen) (\d+)", say=['workspace 2', 'go to workspace 2'], does='Switch workspace (Hyprland, Sway, KDE with kdotool, X11)')
 def _(m, c):
     platform.focus_workspace(int(m.group(1)))
 
 
-@command("focus window", rf"(?:focus )?window(?: on the| to the)? {SIDE}", rf"focus(?: the)? {SIDE}(?: window)?", say=['window left', 'focus right'], does='Move focus to the window on that side (Hyprland)')
+@command("focus window", rf"(?:focus )?window(?: on the| to the)? {SIDE}", rf"focus(?: the)? {SIDE}(?: window)?", say=['window left', 'focus right'], does='Move focus to the window on that side (Hyprland, Sway)')
 def _(m, c):
     d = next(g for g in m.groups() if g)
     platform.focus_direction(DIR[d])

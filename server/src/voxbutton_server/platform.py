@@ -1,8 +1,12 @@
 """Typing, key presses and window info for the desktop the server runs on.
 
-    wayland  wtype (virtual keyboard protocol); Hyprland extras via hyprctl
-    x11      xdotool
-    windows  SendInput through ctypes, no extra installs
+    Hyprland, Sway   wtype (virtual keyboard protocol); hyprctl / swaymsg extras
+    GNOME, KDE       a uinput virtual keyboard (they don't take wtype's protocol)
+    other Wayland    wtype when installed, else uinput
+    X11              xdotool
+    Windows          SendInput through ctypes, no extra installs
+
+"typing" in server.json forces a method: wtype, uinput, xdotool or auto.
 
 Key combos use X keysym-style names everywhere ("ctrl+shift+Tab", "Return",
 "Page_Up", "BackSpace", "F5", "a"); the Windows backend maps them to virtual
@@ -25,11 +29,42 @@ def detect() -> str:
 
 KIND = detect()
 HYPRLAND = bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+SWAY = bool(os.environ.get("SWAYSOCK"))
+_DESKTOP = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+KDE = "kde" in _DESKTOP
+GNOME = "gnome" in _DESKTOP
+
+TYPING = "auto"  # resolved by configure()
+
+
+def configure(typing: str = "auto") -> None:
+    """Picks how to type: wtype on compositors that take its protocol, a uinput
+    keyboard on GNOME/KDE (or when wtype is missing), xdotool on X11."""
+    global TYPING
+    if typing not in ("auto", "wtype", "uinput", "xdotool"):
+        typing = "auto"
+    if typing == "auto":
+        if KIND == "windows":
+            typing = "sendinput"
+        elif KIND == "x11":
+            typing = "xdotool"
+        elif (HYPRLAND or SWAY) or (shutil.which("wtype") and not (GNOME or KDE)):
+            typing = "wtype"
+        else:
+            typing = "uinput"
+    TYPING = typing
 
 
 def missing_tool() -> str | None:
-    """Name of the typing tool this desktop needs but lacks, if any."""
-    tool = {"wayland": "wtype", "x11": "xdotool"}.get(KIND)
+    """What this desktop needs for typing but lacks, if anything."""
+    if TYPING == "auto":
+        configure()
+    if TYPING == "uinput":
+        if not os.access("/dev/uinput", os.W_OK):
+            return ("write access to /dev/uinput (add the udev rule KERNEL==\"uinput\", TAG+=\"uaccess\" "
+                    "or join the input group, then log in again)")
+        return None
+    tool = {"wtype": "wtype", "xdotool": "xdotool"}.get(TYPING)
     return tool if tool and not shutil.which(tool) else None
 
 
@@ -131,9 +166,15 @@ if KIND == "windows":
 
 
 def type_text(text: str) -> None:
+    if TYPING == "auto":
+        configure()
     if KIND == "windows":
         _send(_unicode_events(text))
-    elif KIND == "wayland":
+    elif TYPING == "uinput":
+        from voxbutton_server.uinput import Keyboard
+
+        Keyboard.get().type(text)
+    elif TYPING == "wtype":
         _run("wtype", "--", text)
     else:
         _run("xdotool", "type", "--clearmodifiers", "--delay", "4", "--", text)
@@ -146,7 +187,11 @@ def key(combo: str, times: int = 1) -> None:
         vks = [_vk(m) for m in mods] + [_vk(k)]
         once = [_key_event(v, False) for v in vks] + [_key_event(v, True) for v in reversed(vks)]
         _send(once * times)
-    elif KIND == "wayland":
+    elif TYPING == "uinput":
+        from voxbutton_server.uinput import Keyboard
+
+        Keyboard.get().key(combo, times)
+    elif TYPING == "wtype":
         args = []
         for _ in range(times):
             args += [a for m in mods for a in ("-M", m)] + ["-k", k] + [a for m in reversed(mods) for a in ("-m", m)]
@@ -162,6 +207,10 @@ def active_app() -> str:
             return _foreground_exe().lower()
         if HYPRLAND:
             return (json.loads(_run("hyprctl", "activewindow", "-j", timeout=3) or "{}").get("class") or "").lower()
+        if SWAY:
+            return _sway_focused()
+        if KDE and shutil.which("kdotool"):
+            return _run("kdotool", "getactivewindow", "getwindowclassname", timeout=3).strip().lower()
         if KIND == "x11" and shutil.which("xdotool"):
             return _run("xdotool", "getactivewindow", "getwindowclassname", timeout=3).strip().lower()
     except (OSError, subprocess.SubprocessError, ValueError):
@@ -169,9 +218,25 @@ def active_app() -> str:
     return ""
 
 
+def _sway_focused() -> str:
+    def walk(node):
+        if node.get("focused"):
+            return node.get("app_id") or (node.get("window_properties") or {}).get("class") or ""
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            if (found := walk(child)) is not None:
+                return found
+        return None
+
+    return (walk(json.loads(_run("swaymsg", "-t", "get_tree", timeout=3))) or "").lower()
+
+
 def focus_workspace(n: int) -> None:
     if HYPRLAND:
         _hypr(f'hl.dsp.focus({{ workspace = "{n}" }})')
+    elif SWAY:
+        _run("swaymsg", "workspace", "number", str(n), timeout=5)
+    elif KDE and shutil.which("kdotool"):
+        _run("kdotool", "set_desktop", str(n), timeout=5)
     elif KIND == "x11":
         _run("xdotool", "set_desktop", str(n - 1))
     else:
@@ -182,8 +247,10 @@ def focus_direction(d: str) -> None:
     """d is one of l, r, u, d."""
     if HYPRLAND:
         _hypr(f'hl.dsp.focus({{ direction = "{d}" }})')
+    elif SWAY:
+        _run("swaymsg", "focus", {"l": "left", "r": "right", "u": "up", "d": "down"}[d], timeout=5)
     else:
-        raise Unsupported("moving focus by direction is only available on Hyprland")
+        raise Unsupported("moving focus by direction is only available on Hyprland and Sway")
 
 
 def close_window() -> None:
@@ -194,6 +261,8 @@ def close_window() -> None:
         if not app or app.startswith("voxbutton"):
             raise Unsupported("no app window in focus")
         _hypr("hl.dsp.window.close()")  # acts on the active window, which is the one checked above
+    elif SWAY:
+        _run("swaymsg", "kill", timeout=5)
     else:
         key("alt+F4")
 

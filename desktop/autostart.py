@@ -4,7 +4,8 @@
     Hyprland  a systemd user service running linux/voxbutton-session.sh, which
               waits for the session (the Hyprland config is left alone: saving
               it makes Hyprland reload)
-    other     an XDG autostart entry running linux/start-x11.sh
+    other     an XDG autostart entry (GNOME, KDE, Sway, X11 desktops all run
+              these at login) running linux/start-desktop.sh
 
 Used by both settings windows; also runnable: autostart.py [on|off|status]."""
 
@@ -107,7 +108,7 @@ WantedBy=default.target
 Type=Application
 Name=VoxButton
 Comment=Floating mic button with local Whisper
-Exec={ROOT / "linux" / "start-x11.sh"}
+Exec={ROOT / "linux" / "start-desktop.sh"}
 X-GNOME-Autostart-enabled=true
 """)
 
