@@ -3,7 +3,8 @@
 screen, for a few seconds. It never takes focus (it's only there to read), so
 typing carries on where it was. The button starts it; one at a time.
 
-Usage: voxbutton-correction.py ORIGINAL CORRECTED [--seconds 10]
+Usage: voxbutton-correction.py ORIGINAL CORRECTED [--seconds 10] [--ok]
+       (--ok: nothing to correct, a short "looks good" card)
 """
 
 import argparse
@@ -14,15 +15,19 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-APP_ID = "voxbutton-correction"
+APP_ID = "voxbutton-card"
 WIDTH = 720
 
 CSS = """
 window, window.background { background: transparent; }
-.card { background: #18181b; border-radius: 14px; padding: 14px 18px;
-        border: 1px solid rgba(255, 255, 255, 0.08); }
-.tag { font-size: 0.8em; font-weight: bold; opacity: 0.55; }
-.said { color: #b8b8be; }
+.card { border-radius: 14px; padding: 14px 18px; }
+/* red: it had to correct you · green: you got it right */
+.card.wrong { background: #2b1214; border: 2px solid #e01b24; }
+.card.ok { background: #10251a; border: 2px solid #2ec27e; }
+.tag { font-size: 0.8em; font-weight: bold; }
+.said-tag { color: #f66151; }
+.said { color: #d8c4c4; }
+.card.ok .said { color: #ffffff; font-size: 1.1em; }
 .better { color: #ffffff; font-size: 1.15em; font-weight: 600; }
 .better-tag { color: #57e389; }
 """
@@ -51,6 +56,7 @@ def main() -> None:
     ap.add_argument("original")
     ap.add_argument("corrected")
     ap.add_argument("--seconds", type=float, default=10)
+    ap.add_argument("--ok", action="store_true", help="the sentence was already fine")
     args = ap.parse_args()
     add_window_rule()
     GLib.set_prgname(APP_ID)
@@ -65,12 +71,16 @@ def main() -> None:
         Gtk.StyleContext.add_provider_for_display(win.get_display(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         card.add_css_class("card")
-        card.append(label("YOU SAID", "tag"))
-        card.append(label(args.original, "said"))
-        sep = Gtk.Box(margin_top=4)
-        card.append(sep)
-        card.append(label("BETTER", "tag", "better-tag"))
-        card.append(label(args.corrected, "better"))
+        card.add_css_class("ok" if args.ok else "wrong")
+        if args.ok:
+            card.append(label("✓ LOOKS GOOD", "tag", "better-tag"))
+            card.append(label(args.original, "said"))
+        else:
+            card.append(label("✗ YOU SAID", "tag", "said-tag"))
+            card.append(label(args.original, "said"))
+            card.append(Gtk.Box(margin_top=4))
+            card.append(label("✓ BETTER", "tag", "better-tag"))
+            card.append(label(args.corrected, "better"))
         win.set_child(card)
         win.present()
         GLib.timeout_add(int(args.seconds * 1000), a.quit)

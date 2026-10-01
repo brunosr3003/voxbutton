@@ -310,7 +310,8 @@ class Button(Gtk.ApplicationWindow):
         if self.correction_proc and self.correction_proc.poll() is None:
             self.correction_proc.terminate()
         script = Path(__file__).with_name("voxbutton-correction.py")
-        self.correction_proc = subprocess.Popen([sys.executable, str(script), c["original"], c["corrected"]],
+        extra = ["--ok", "--seconds", "4"] if c.get("ok") else []
+        self.correction_proc = subprocess.Popen([sys.executable, str(script), c["original"], c["corrected"], *extra],
                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def flash(self, kind: str) -> None:

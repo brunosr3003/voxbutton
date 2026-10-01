@@ -22,6 +22,11 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "desktop"))
 import autostart  # noqa: E402
 
+CORRECTOR_SHOW = [
+    ("changes", "Only when something was corrected"),
+    ("always", "After every dictation (“looks good” when it's fine)"),
+]
+
 RECORD_MODES = [
     ("toggle", "Toggle: click to start, click to stop"),
     ("hold", "Hold: talk while holding the button"),
@@ -200,9 +205,12 @@ class Settings(Gtk.ApplicationWindow):
         corr.attach(label("After each dictation, a card at the top of the screen shows what you said and a "
                           "corrected, more natural version. What gets typed doesn't change.", "dim", wrap=True),
                     1, 1, 1, 1)
-        corr.attach(label("Model"), 0, 2, 1, 1)
-        corr.attach(self.corrector_model, 1, 2, 1, 1)
-        corr.attach(label("A local Ollama model; it runs on this computer's GPU.", "dim", wrap=True), 1, 3, 1, 1)
+        self.corrector_show = Gtk.DropDown.new_from_strings([d for _, d in CORRECTOR_SHOW])
+        corr.attach(label("Show the card"), 0, 2, 1, 1)
+        corr.attach(self.corrector_show, 1, 2, 1, 1)
+        corr.attach(label("Model"), 0, 3, 1, 1)
+        corr.attach(self.corrector_model, 1, 3, 1, 1)
+        corr.attach(label("A local Ollama model; it runs on this computer's GPU.", "dim", wrap=True), 1, 4, 1, 1)
         page.append(corr)
 
         page.append(Gtk.Separator(margin_top=8))
@@ -307,6 +315,7 @@ class Settings(Gtk.ApplicationWindow):
             modes = [m for m, _ in RECORD_MODES]
             self.corrector.set_active(bool(s.get("corrector")))
             self.corrector_model.set_text(s.get("corrector_model", ""))
+            self.corrector_show.set_selected(1 if s.get("corrector_show") == "always" else 0)
             self.pause.set_value(s.get("listen_pause", 0.6))
             self.chunk.set_value(s.get("listen_chunk", 6))
             self.record_mode.set_selected(modes.index(s.get("record_mode", "toggle"))
@@ -329,7 +338,8 @@ class Settings(Gtk.ApplicationWindow):
                 "min_level": self.min_level.get_value(),
                 "record_mode": RECORD_MODES[self.record_mode.get_selected()][0],
                 "listen_pause": self.pause.get_value(), "listen_chunk": self.chunk.get_value(),
-                "corrector": self.corrector.get_active(), "corrector_model": self.corrector_model.get_text().strip()}
+                "corrector": self.corrector.get_active(), "corrector_model": self.corrector_model.get_text().strip(),
+                "corrector_show": CORRECTOR_SHOW[self.corrector_show.get_selected()][0]}
         r = api(self.server, self.token, "POST", "/config", body)
         self.save_status.set_text("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 

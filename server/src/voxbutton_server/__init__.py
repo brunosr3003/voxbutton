@@ -49,6 +49,7 @@ DEFAULTS = {
     "listen_chunk": 6.0,  # always on: while you keep talking, send about this often (seconds)
     "corrector": False,  # show a corrected version of your English after each dictation
     "corrector_model": "qwen2.5:3b",  # an Ollama model
+    "corrector_show": "changes",  # "changes": only when it corrected something · "always": every dictation
     "corrector_url": "http://127.0.0.1:11434",  # where Ollama listens
 }
 RECORD_MODES = ("toggle", "hold", "always")
@@ -194,8 +195,9 @@ class Corrector:
               "names, code and commands exactly as they are. Do not add anything, answer questions, or "
               "explain. Reply with only the corrected text.")
 
-    def __init__(self, enabled: bool, model: str, url: str):
+    def __init__(self, enabled: bool, model: str, url: str, show: str = "changes"):
         self.enabled, self.model, self.url = enabled, model, url.rstrip("/")
+        self.show = show if show in ("changes", "always") else "changes"
 
     def _post(self, path: str, body: dict, timeout: float) -> dict:
         req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(),
@@ -480,6 +482,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         "listen_chunk": remote.listen["chunk"],
                         "corrector": corrector.enabled,
                         "corrector_model": corrector.model,
+                        "corrector_show": corrector.show,
                     },
                     "connect": {**urls, "token": token},
                     "commands": commands.CATALOG,
@@ -534,6 +537,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                     if "corrector" in body:
                         corrector.enabled = bool(body["corrector"])
                         corrector.warm()
+                    if body.get("corrector_show") in ("changes", "always"):
+                        corrector.show = body["corrector_show"]
                     if body.get("corrector_model"):
                         corrector.model = str(body["corrector_model"]).strip()
                     if "listen_chunk" in body:
@@ -543,7 +548,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 save_config({"languages": transcribe.languages, "min_level": transcribe.min_level,
                              "record_mode": remote.record_mode, "listen_pause": remote.listen["pause"],
                              "listen_chunk": remote.listen["chunk"], "corrector": corrector.enabled,
-                             "corrector_model": corrector.model})
+                             "corrector_model": corrector.model, "corrector_show": corrector.show})
                 log(f"settings: languages={transcribe.languages} min_level={transcribe.min_level} "
                     f"record_mode={remote.record_mode}")
                 return self.reply(200, {"ok": True})
@@ -627,11 +632,15 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
         def correct(self, text: str) -> None:
             t = time.time()
             better = corrector.correct(text)
-            if not better or corrector.same(text, better):
+            if not better:
                 return
-            log(f"  corrected in {time.time() - t:.2f}s: {better!r}")
+            ok = corrector.same(text, better)
+            if ok and corrector.show != "always":
+                return
+            log(f"  {'looks good' if ok else 'corrected'} in {time.time() - t:.2f}s: {better!r}")
             with remote.cond:
-                remote.correction = {"id": remote.correction["id"] + 1, "original": text, "corrected": better}
+                remote.correction = {"id": remote.correction["id"] + 1, "original": text,
+                                     "corrected": text if ok else better, "ok": ok}
 
     return Handler
 
@@ -685,7 +694,7 @@ def main() -> None:
     remote = Remote(StreamWatcher())
     remote.record_mode = cfg["record_mode"] if cfg["record_mode"] in RECORD_MODES else "toggle"
     remote.listen = {"pause": float(cfg["listen_pause"]), "chunk": float(cfg["listen_chunk"])}
-    corrector = Corrector(bool(cfg["corrector"]), cfg["corrector_model"], cfg["corrector_url"])
+    corrector = Corrector(bool(cfg["corrector"]), cfg["corrector_model"], cfg["corrector_url"], cfg["corrector_show"])
     handler = make_handler(transcriber, remote, token, cfg["type"], set(cfg["trust"]),
                            {"local": f"http://{host}:{cfg['port']}", "public": cfg["public_url"]}, corrector)
     server = ThreadingHTTPServer((host, int(cfg["port"])), handler)

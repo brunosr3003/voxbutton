@@ -35,6 +35,11 @@ from tkinter import ttk
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import autostart  # noqa: E402
 
+CORRECTOR_SHOW = [
+    ("changes", "Only when something was corrected"),
+    ("always", "After every dictation (“looks good” when it's fine)"),
+]
+
 RECORD_MODES = [
     ("toggle", "Toggle: click to start, click to stop"),
     ("hold", "Hold: talk while holding the button"),
@@ -269,24 +274,27 @@ class Button:
         self.correction_seen = cid
         if self.correction_win and self.correction_win.winfo_exists():
             self.correction_win.destroy()
-        w = tk.Toplevel(self.root, bg="#18181b")
+        # red: it had to correct you · green: you got it right
+        bg, edge = ("#10251a", "#2ec27e") if c.get("ok") else ("#2b1214", "#e01b24")
+        w = tk.Toplevel(self.root, bg=bg, highlightthickness=2, highlightbackground=edge, highlightcolor=edge)
         w.overrideredirect(True)
         w.attributes("-topmost", True)
         width = 720
-        for text, color, font in (("YOU SAID", "#7a7a80", ("TkDefaultFont", 8, "bold")),
-                                  (c["original"], "#b8b8be", ("TkDefaultFont", 10)),
-                                  ("BETTER", "#57e389", ("TkDefaultFont", 8, "bold")),
-                                  (c["corrected"], "#ffffff", ("TkDefaultFont", 12, "bold"))):
-            tk.Label(w, text=text, fg=color, bg="#18181b", font=font, wraplength=width - 36, justify="left",
-                     anchor="w").pack(fill="x", padx=18, pady=(8 if text in ("YOU SAID", "BETTER") else 0, 0))
-        tk.Frame(w, height=12, bg="#18181b").pack()
+        tag = ("TkDefaultFont", 8, "bold")
+        rows = ((("✓ LOOKS GOOD", "#57e389", tag), (c["original"], "#ffffff", ("TkDefaultFont", 11))) if c.get("ok")
+                else (("✗ YOU SAID", "#f66151", tag), (c["original"], "#d8c4c4", ("TkDefaultFont", 10)),
+                      ("✓ BETTER", "#57e389", tag), (c["corrected"], "#ffffff", ("TkDefaultFont", 12, "bold"))))
+        for text, color, font in rows:
+            tk.Label(w, text=text, fg=color, bg=bg, font=font, wraplength=width - 36, justify="left",
+                     anchor="w").pack(fill="x", padx=18, pady=(8 if font is tag else 0, 0))
+        tk.Frame(w, height=12, bg=bg).pack()
         w.update_idletasks()
         x = (w.winfo_screenwidth() - width) // 2
         y = 70
         w.geometry(f"{width}x{w.winfo_reqheight()}+{x}+{y}")
         if WIN:
             no_activate(w)
-        w.after(10000, lambda: w.winfo_exists() and w.destroy())
+        w.after(4000 if c.get("ok") else 10000, lambda: w.winfo_exists() and w.destroy())
         self.correction_win = w
 
     def flash(self, kind: str):
@@ -457,6 +465,12 @@ class Settings:
         self.corr = tk.BooleanVar(value=False)
         self.corr_model = tk.StringVar()
         ttk.Checkbutton(f, text="Show a better version after each dictation", variable=self.corr).pack(anchor="w")
+        self.corr_show = tk.StringVar(value=CORRECTOR_SHOW[0][1])
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=2)
+        ttk.Label(row, text="Show the card", width=16).pack(side="left")
+        ttk.Combobox(row, textvariable=self.corr_show, values=[d for _, d in CORRECTOR_SHOW], state="readonly",
+                     width=44).pack(side="left")
         row = ttk.Frame(f)
         row.pack(anchor="w", pady=2)
         ttk.Label(row, text="Model (Ollama)", width=16).pack(side="left")
@@ -527,6 +541,7 @@ class Settings:
             self.level.set(s.get("min_level", -34))
             self.corr.set(bool(s.get("corrector")))
             self.corr_model.set(s.get("corrector_model", ""))
+            self.corr_show.set(dict(CORRECTOR_SHOW).get(s.get("corrector_show"), CORRECTOR_SHOW[0][1]))
             self.pause.set(s.get("listen_pause", 0.6))
             self.chunk.set(s.get("listen_chunk", 6))
             self.rec_mode.set(dict(RECORD_MODES).get(s.get("record_mode"), RECORD_MODES[0][1]))
@@ -550,7 +565,8 @@ class Settings:
         r = self.client.call("POST", "/config", {
             "languages": [l.strip() for l in self.langs.get().split(",") if l.strip()], "min_level": level,
             "record_mode": mode, "listen_pause": float(self.pause.get()), "listen_chunk": float(self.chunk.get()),
-            "corrector": bool(self.corr.get()), "corrector_model": self.corr_model.get().strip()})
+            "corrector": bool(self.corr.get()), "corrector_model": self.corr_model.get().strip(),
+            "corrector_show": next((k for k, d in CORRECTOR_SHOW if d == self.corr_show.get()), "changes")})
         self.saved.set("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 
 
