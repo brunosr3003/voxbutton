@@ -5,8 +5,8 @@ Left button dictates, right button records a voice command ("next tab",
 "workspace 2", "send"...). How depends on the record mode (settings):
 toggle = click to start, click to stop; hold = talk while holding;
 always = click once and it keeps listening, typing at every pause.
-The gear opens the settings; hold the gear (or the button, outside hold
-mode) and move to drag it somewhere else. The recording itself
+The gear opens the settings; hold the gear and move to drag the button
+somewhere else. The recording itself
 happens wherever the mic agent runs (the Mac app), the text is typed here by
 the voxbutton server. Clicking it hands keyboard focus straight back to the
 window you were typing in, so that's where the text lands.
@@ -200,13 +200,13 @@ class Button(Gtk.ApplicationWindow):
     def on_left_down(self, gesture, x, y):
         self.down_at = (x, y)
         self.talking = False
-        if self.record_mode == "hold" and not self.on_gear(x, y):
-            # Push-to-talk: the hold is the recording, so there's no dragging here
-            # (the gear still drags).
-            self.talking = True
+        if self.on_gear(x, y):
+            # Only the gear moves the button (hold it and drag); the button itself
+            # never moves, so a long click can't drag it by accident.
+            self.hold_id = GLib.timeout_add(HOLD_MS, self.start_drag, x, y)
+        elif self.record_mode == "hold":
+            self.talking = True  # push-to-talk: the hold is the recording
             self.send("/record/start?mode=chat")
-            return
-        self.hold_id = GLib.timeout_add(HOLD_MS, self.start_drag, x, y)
 
     def on_left_up(self, gesture, dx, dy):
         if self.hold_id:

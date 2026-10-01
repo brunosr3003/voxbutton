@@ -7,8 +7,7 @@ lands in the window you were typing in:
     left button   dictate      right button   voice command ("next tab", ...)
     record mode (settings): toggle = click to start and stop, hold = talk
                   while holding, always = click once, it types at every pause
-    drag          move it (the position is remembered); in hold mode drag
-                  by the gear
+    drag the gear move it (the position is remembered)
     gear          settings: devices, how to connect, commands, modes
 
 On Hyprland use linux/voxbutton-button.py instead (Wayland windows can't
@@ -193,7 +192,8 @@ class Button:
         threading.Thread(target=lambda: self.apply_async(self.client.call("POST", path)), daemon=True).start()
 
     def on_press(self, e):
-        self.press = (e.x_root, e.y_root, self.root.winfo_x(), self.root.winfo_y())
+        # Only the gear drags the button; the button itself never moves.
+        self.press = (e.x_root, e.y_root, self.root.winfo_x(), self.root.winfo_y()) if self.on_gear(e.x, e.y) else None
         self.dragged = False
         if self.record_mode == "hold" and not self.on_gear(e.x, e.y) and self.state != "busy":
             self.talking = True
@@ -501,7 +501,7 @@ class Settings:
         ttk.Label(row, textvariable=self.saved).pack(side="left", padx=10)
         self.heading(f, "Button")
         ttk.Label(f, wraplength=580, foreground="#777", text=(
-            "Left button: dictate · Right button: voice command · Drag: move · Gear: this window.\n"
+            "Left button: dictate · Right button: voice command · Gear: this window (hold it and move to drag the button).\n"
             "Colors: dark ready, red dictating, blue command, teal listening, orange transcribing, "
             "green done, purple error, gray no microphone.")).pack(anchor="w")
 

@@ -94,7 +94,7 @@ run; `--config` prints the settings in use, `--print-token` the token.
 
 On **Windows** and **X11** it's `desktop/voxbutton_tk.py` (Tk, ships with
 Python; the start scripts above launch it). It never takes keyboard focus, you
-drag it wherever you want, and it remembers the spot.
+drag it by its gear wherever you want, and it remembers the spot.
 
 On **Hyprland** it's `linux/voxbutton-button.py`. It needs Python with GTK 4
 bindings (`python-gobject`). The script

@@ -178,7 +178,7 @@ class Settings(Gtk.ApplicationWindow):
         rec.attach(label("Mode"), 0, 0, 1, 1)
         rec.attach(self.record_mode, 1, 0, 1, 1)
         rec.attach(label("Always on: start a sentence with “command” to run it as one, e.g. "
-                         "“command next tab”. In hold mode, drag the button by its gear.", "dim", wrap=True), 1, 1, 1, 1)
+                         "“command next tab”. Hold the gear and move it to drag the button.", "dim", wrap=True), 1, 1, 1, 1)
         self.pause = Gtk.SpinButton.new_with_range(0.2, 3.0, 0.1)
         self.chunk = Gtk.SpinButton.new_with_range(2, 30, 1)
         rec.attach(label("Always on: send after a pause of (s)"), 0, 4, 1, 1)
@@ -240,7 +240,7 @@ class Settings(Gtk.ApplicationWindow):
         page.append(Gtk.Separator(margin_top=8))
         page.append(label("Button", "title"))
         page.append(label("Left button: dictate · Right button: voice command · Gear: this window · "
-                          "hold and move: drag it.\n"
+                          "hold the gear and move: drag it.\n"
                           "Colors: dark ready, red dictating, blue command, teal listening, orange "
                           "transcribing, green done, purple error, faded no microphone.", "dim", wrap=True))
         self.general_loaded = False
