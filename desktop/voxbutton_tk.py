@@ -53,7 +53,8 @@ else:
 BUTTON_FILE = CONFIG_DIR / "button.json"
 REPO = "https://github.com/brunosr3003/voxbutton"
 
-SIZE = 64
+SIZE = 64  # each button: the mic on top, the command button below
+HEIGHT = SIZE * 2
 GEAR_R = 9
 KEY = "#010203"  # transparent color key on Windows
 COLORS = {
@@ -153,12 +154,12 @@ class Button:
         if WIN:
             root.attributes("-transparentcolor", KEY)
         pos = self.load_pos(root)
-        root.geometry(f"{SIZE}x{SIZE}+{pos[0]}+{pos[1]}")
-        self.cv = tk.Canvas(root, width=SIZE, height=SIZE, bg=bg, highlightthickness=0, bd=0)
+        root.geometry(f"{SIZE}x{HEIGHT}+{pos[0]}+{pos[1]}")
+        self.cv = tk.Canvas(root, width=SIZE, height=HEIGHT, bg=bg, highlightthickness=0, bd=0)
         self.cv.pack()
         self.cv.bind("<ButtonPress-1>", self.on_press)
         self.cv.bind("<B1-Motion>", self.on_drag)
-        self.cv.bind("<ButtonRelease-1>", lambda e: self.on_release(e, "chat"))
+        self.cv.bind("<ButtonRelease-1>", lambda e: self.on_release(e, self.which(self.press_y)))
         self.cv.bind("<ButtonPress-3>", self.on_right_press)
         self.cv.bind("<ButtonRelease-3>", self.on_right_release)
         if WIN:
@@ -176,7 +177,7 @@ class Button:
             p = json.loads(BUTTON_FILE.read_text())
             return int(p["x"]), int(p["y"])
         except (OSError, ValueError, KeyError, TypeError):
-            return root.winfo_screenwidth() - SIZE - 24, root.winfo_screenheight() // 2 - SIZE // 2
+            return root.winfo_screenwidth() - SIZE - 24, root.winfo_screenheight() // 2 - HEIGHT // 2
 
     def save_pos(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -188,16 +189,24 @@ class Button:
         g = SIZE - GEAR_R - 1
         return (x - g) ** 2 + (y - g) ** 2 <= (GEAR_R + 3) ** 2 and self.state not in ("recording", "listening")
 
+    @staticmethod
+    def which(y: int) -> str:
+        """The top button dictates, the bottom one takes a voice command."""
+        return "chat" if y < SIZE else "command"
+
     def send(self, path: str) -> None:
         threading.Thread(target=lambda: self.apply_async(self.client.call("POST", path)), daemon=True).start()
 
+    press_y = 0
+
     def on_press(self, e):
+        self.press_y = e.y
         # Only the gear drags the button; the button itself never moves.
         self.press = (e.x_root, e.y_root, self.root.winfo_x(), self.root.winfo_y()) if self.on_gear(e.x, e.y) else None
         self.dragged = False
         if self.record_mode == "hold" and not self.on_gear(e.x, e.y) and self.state != "busy":
             self.talking = True
-            self.send("/record/start?mode=chat")
+            self.send(f"/record/start?mode={self.which(e.y)}")
 
     def on_right_press(self, e):
         if self.record_mode == "hold":
@@ -205,6 +214,7 @@ class Button:
 
     def on_right_release(self, e):
         if self.record_mode == "hold":
+            self.talking = False
             self.send("/record/stop")
         else:
             self.on_release(e, "command")
@@ -219,7 +229,7 @@ class Button:
         self.root.geometry(f"+{self.press[2] + dx}+{self.press[3] + dy}")
 
     def on_release(self, e, mode: str):
-        if self.talking and mode == "chat":
+        if self.talking:
             self.talking = False
             self.send("/record/stop")
             return
@@ -294,7 +304,10 @@ class Button:
         w.geometry(f"{width}x{w.winfo_reqheight()}+{x}+{y}")
         if WIN:
             no_activate(w)
-        w.after(4000 if c.get("ok") else 10000, lambda: w.winfo_exists() and w.destroy())
+        # Long text stays up longer: about a quarter second per word.
+        words = len(c["original"].split()) + (0 if c.get("ok") else len(c["corrected"].split()))
+        seconds = min(10, 3 + words * 0.15) if c.get("ok") else min(25, 5 + words * 0.25)
+        w.after(int(seconds * 1000), lambda: w.winfo_exists() and w.destroy())
         self.correction_win = w
 
     def flash(self, kind: str):
@@ -316,28 +329,42 @@ class Button:
         cv = self.cv
         cv.delete("all")
         look = self.flash_kind if time.time() < self.flash_until else self.state
-        color = COLORS["command" if look in ("recording", "listening") and self.mode == "command" else look]
-        c, r = SIZE / 2, SIZE / 2 - 6
-        if look in ("recording", "listening"):
-            p = 2 + 2 * (0.5 + 0.5 * math.sin(time.time() * 5))
-            cv.create_oval(c - r - p, c - r - p, c + r + p, c + r + p, fill=color, outline="", stipple="gray50")
-        cv.create_oval(c - r, c - r, c + r, c + r, fill=color, outline="")
-        fg = "#ffffff" if look != "offline" else "#b0b0b5"
-        s = r / 22
-        if look == "busy":
-            for i in (-1, 0, 1):
-                x = c + i * 7 * s
-                cv.create_oval(x - 2.4 * s, c - 2.4 * s, x + 2.4 * s, c + 2.4 * s, fill=fg, outline="")
-        else:
-            top, cw, ch = c - 11 * s, 8 * s, 14 * s
-            cv.create_rectangle(c - cw / 2, top + cw / 2, c + cw / 2, top + ch - cw / 2, fill=fg, outline="")
-            cv.create_oval(c - cw / 2, top, c + cw / 2, top + cw, fill=fg, outline="")
-            cv.create_oval(c - cw / 2, top + ch - cw, c + cw / 2, top + ch, fill=fg, outline="")
-            cy = top + ch - cw / 2
-            cv.create_arc(c - 7 * s, cy - 7 * s, c + 7 * s, cy + 7 * s, start=180, extent=180,
-                          style="arc", outline=fg, width=2.2 * s)
-            cv.create_line(c, cy + 7 * s, c, top + ch + 6 * s, fill=fg, width=2.2 * s)
-            cv.create_line(c - 5 * s, top + ch + 6 * s, c + 5 * s, top + ch + 6 * s, fill=fg, width=2.2 * s)
+        busy = look in ("recording", "listening", "busy")
+        for slot, top in (("chat", 0), ("command", SIZE)):
+            # The button in use shows the state; the other one stays idle.
+            mine = self.mode == slot
+            if look == "offline":
+                state = "offline"
+            elif busy or look in ("done", "error"):
+                state = look if mine else "idle"
+            else:
+                state = look
+            color = COLORS["command" if state in ("recording", "listening") and slot == "command" else state]
+            cx, c, r = SIZE / 2, top + SIZE / 2, SIZE / 2 - 6
+            if state in ("recording", "listening"):
+                p = 2 + 2 * (0.5 + 0.5 * math.sin(time.time() * 5))
+                cv.create_oval(cx - r - p, c - r - p, cx + r + p, c + r + p, fill=color, outline="", stipple="gray50")
+            cv.create_oval(cx - r, c - r, cx + r, c + r, fill=color, outline="")
+            fg = "#ffffff" if state != "offline" else "#b0b0b5"
+            s = r / 22
+            if state == "busy":
+                for i in (-1, 0, 1):
+                    x = cx + i * 7 * s
+                    cv.create_oval(x - 2.4 * s, c - 2.4 * s, x + 2.4 * s, c + 2.4 * s, fill=fg, outline="")
+            elif slot == "chat":
+                t, cw, ch = c - 11 * s, 8 * s, 14 * s
+                cv.create_rectangle(cx - cw / 2, t + cw / 2, cx + cw / 2, t + ch - cw / 2, fill=fg, outline="")
+                cv.create_oval(cx - cw / 2, t, cx + cw / 2, t + cw, fill=fg, outline="")
+                cv.create_oval(cx - cw / 2, t + ch - cw, cx + cw / 2, t + ch, fill=fg, outline="")
+                cy = t + ch - cw / 2
+                cv.create_arc(cx - 7 * s, cy - 7 * s, cx + 7 * s, cy + 7 * s, start=180, extent=180,
+                              style="arc", outline=fg, width=2.2 * s)
+                cv.create_line(cx, cy + 7 * s, cx, t + ch + 6 * s, fill=fg, width=2.2 * s)
+                cv.create_line(cx - 5 * s, t + ch + 6 * s, cx + 5 * s, t + ch + 6 * s, fill=fg, width=2.2 * s)
+            else:  # ">_" prompt
+                cv.create_line(cx - 9 * s, c - 7 * s, cx - 2 * s, c, cx - 9 * s, c + 7 * s, fill=fg,
+                               width=2.6 * s, capstyle="round", joinstyle="round")
+                cv.create_line(cx + 1 * s, c + 7 * s, cx + 10 * s, c + 7 * s, fill=fg, width=2.6 * s, capstyle="round")
         if look not in ("recording", "listening"):
             g = SIZE - GEAR_R - 1
             cv.create_oval(g - GEAR_R, g - GEAR_R, g + GEAR_R, g + GEAR_R, fill="#38383f", outline="")
@@ -428,7 +455,7 @@ class Settings:
         f = self.commands
         self.heading(f, "Voice commands")
         ttk.Label(f, wraplength=580, foreground="#777", text=(
-            "Right-click the button (it turns blue), say the command in English, click again.")).pack(anchor="w")
+            "Tap the bottom button (>_) or right-click (it turns blue) and say the command in English; it runs when you pause.")).pack(anchor="w")
         self.cmds = ttk.Treeview(f, columns=("say", "does"), show="headings")
         self.cmds.heading("say", text="Say")
         self.cmds.heading("does", text="Does")
@@ -501,7 +528,7 @@ class Settings:
         ttk.Label(row, textvariable=self.saved).pack(side="left", padx=10)
         self.heading(f, "Button")
         ttk.Label(f, wraplength=580, foreground="#777", text=(
-            "Left button: dictate · Right button: voice command · Gear: this window (hold it and move to drag the button).\n"
+            "Top button (mic): dictate · Bottom button (>_) or right-click: voice command · Gear: this window (hold it and move to drag the button).\n"
             "Colors: dark ready, red dictating, blue command, teal listening, orange transcribing, "
             "green done, purple error, gray no microphone.")).pack(anchor="w")
 

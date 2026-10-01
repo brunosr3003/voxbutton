@@ -30,8 +30,9 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-APP_ID = "voxbutton-button"
-SIZE = 64
+APP_ID = "voxbutton-pad"
+SIZE = 64  # each button; the mic is on top, the command button below it
+HEIGHT = SIZE * 2
 GEAR_R = 9  # the settings badge in the bottom-right corner
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "voxbutton"
 POS_FILE = CONFIG_DIR / "button-hyprland.json"
@@ -72,7 +73,7 @@ def add_window_rule(x: str, y: str) -> None:
     lua = (
         'hl.window_rule({ match = { class = "^(%s)$" }, float = true, pin = true, '
         "no_initial_focus = true, no_follow_mouse = true, decorate = false, border_size = 0, no_shadow = true, no_blur = true, no_anim = true, "
-        'size = { %d, %d }, move = { "%s", "%s" } })' % (APP_ID, SIZE, SIZE, x, y)
+        'size = { %d, %d }, move = { "%s", "%s" } })' % (APP_ID, SIZE, HEIGHT, x, y)
     )
     hypr("eval", lua)
 
@@ -140,7 +141,7 @@ class Button(Gtk.ApplicationWindow):
         self.flash_until = 0.0
         self.flash_kind = ""
         self.set_decorated(False)
-        self.set_default_size(SIZE, SIZE)
+        self.set_default_size(SIZE, HEIGHT)
         self.set_resizable(False)
 
         css = Gtk.CssProvider()
@@ -149,7 +150,7 @@ class Button(Gtk.ApplicationWindow):
 
         self.area = Gtk.DrawingArea()
         self.area.set_content_width(SIZE)
-        self.area.set_content_height(SIZE)
+        self.area.set_content_height(HEIGHT)
         self.area.set_draw_func(self.draw)
         self.set_child(self.area)
 
@@ -197,16 +198,21 @@ class Button(Gtk.ApplicationWindow):
 
     # --- moving (click and hold) ---
 
+    @staticmethod
+    def which(y: float) -> str:
+        """The top button dictates, the bottom one takes a voice command."""
+        return "chat" if y < SIZE else "command"
+
     def on_left_down(self, gesture, x, y):
         self.down_at = (x, y)
         self.talking = False
         if self.on_gear(x, y):
-            # Only the gear moves the button (hold it and drag); the button itself
-            # never moves, so a long click can't drag it by accident.
+            # Only the gear moves the buttons (hold it and drag); the buttons
+            # themselves never move, so a long click can't drag them by accident.
             self.hold_id = GLib.timeout_add(HOLD_MS, self.start_drag, x, y)
         elif self.record_mode == "hold":
             self.talking = True  # push-to-talk: the hold is the recording
-            self.send("/record/start?mode=chat")
+            self.send(f"/record/start?mode={self.which(y)}")
 
     def on_left_up(self, gesture, dx, dy):
         if self.hold_id:
@@ -219,13 +225,13 @@ class Button(Gtk.ApplicationWindow):
             self.talking = False
             self.send("/record/stop")
             return
-        self.on_click(1, *self.down_at)
+        self.on_click(self.which(self.down_at[1]), *self.down_at)
 
     def on_right(self, pressed: bool, x: float, y: float):
         if self.record_mode == "hold":
             self.send("/record/start?mode=command" if pressed else "/record/stop")
         elif not pressed:
-            self.on_click(3, x, y)
+            self.on_click("command", x, y)  # right-click anywhere: a command, as before
 
     def send(self, path: str) -> None:
         def go():
@@ -272,13 +278,12 @@ class Button(Gtk.ApplicationWindow):
         self.focus.restore()
         GLib.idle_add(self.area.queue_draw)
 
-    def on_click(self, button: int, x: float, y: float):
+    def on_click(self, mode: str, x: float, y: float):
         if self.on_gear(x, y) and self.state not in ("recording", "listening"):
             threading.Thread(target=self.open_settings, daemon=True).start()
             return
         if self.state == "busy":
             return
-        mode = "command" if button == 3 else "chat"
         self.send(f"/record/toggle?mode={mode}")
 
     # --- UI (main thread) ---
@@ -310,7 +315,10 @@ class Button(Gtk.ApplicationWindow):
         if self.correction_proc and self.correction_proc.poll() is None:
             self.correction_proc.terminate()
         script = Path(__file__).with_name("voxbutton-correction.py")
-        extra = ["--ok", "--seconds", "4"] if c.get("ok") else []
+        # Long text stays up longer: about a quarter second per word.
+        words = len(c["original"].split()) + (0 if c.get("ok") else len(c["corrected"].split()))
+        seconds = min(10, 3 + words * 0.15) if c.get("ok") else min(25, 5 + words * 0.25)
+        extra = ["--seconds", f"{seconds:.1f}", *(["--ok"] if c.get("ok") else [])]
         self.correction_proc = subprocess.Popen([sys.executable, str(script), c["original"], c["corrected"], *extra],
                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -326,33 +334,58 @@ class Button(Gtk.ApplicationWindow):
 
     def draw(self, _area, cr, w, h):
         look = self.flash_kind if time.time() < self.flash_until else self.state
-        color = "command" if look in ("recording", "listening") and self.mode == "command" else look
-        r, g, b, a = COLORS.get(color, COLORS["idle"])
-        cx, cy, rad = w / 2, h / 2, min(w, h) / 2 - 4
-        if look in ("recording", "listening"):
-            pulse = 0.5 + 0.5 * math.sin(time.time() * 5)
-            cr.set_source_rgba(r, g, b, 0.30)
-            cr.arc(cx, cy, rad + 1 + 2 * pulse, 0, 2 * math.pi)
-            cr.fill()
-        cr.set_source_rgba(r, g, b, a)
-        cr.arc(cx, cy, rad - 2, 0, 2 * math.pi)
-        cr.fill()
-        if self.dragging:
-            cr.set_source_rgba(1, 1, 1, 0.8)
-            cr.set_line_width(2)
-            cr.arc(cx, cy, rad, 0, 2 * math.pi)
-            cr.stroke()
-
-        cr.set_source_rgba(1, 1, 1, 0.95 if look != "offline" else 0.6)
-        s = rad / 22
-        if look == "busy":
-            for i in (-1, 0, 1):
-                cr.arc(cx + i * 7 * s, cy, 2.4 * s, 0, 2 * math.pi)
+        busy = look in ("recording", "listening", "busy")
+        for slot, top in (("chat", 0), ("command", SIZE)):
+            # The button in use shows the state; the other one stays idle.
+            mine = self.mode == slot
+            if look == "offline":
+                state = "offline"
+            elif busy or look in ("done", "error"):
+                state = look if mine else "idle"
+            else:
+                state = look
+            color = "command" if state in ("recording", "listening") and slot == "command" else state
+            r, g, b, a = COLORS.get(color, COLORS["idle"])
+            cx, cy, rad = w / 2, top + SIZE / 2, SIZE / 2 - 4
+            if state in ("recording", "listening"):
+                pulse = 0.5 + 0.5 * math.sin(time.time() * 5)
+                cr.set_source_rgba(r, g, b, 0.30)
+                cr.arc(cx, cy, rad + 1 + 2 * pulse, 0, 2 * math.pi)
                 cr.fill()
-        else:
-            self.draw_mic(cr, cx, cy, s)
+            cr.set_source_rgba(r, g, b, a)
+            cr.arc(cx, cy, rad - 2, 0, 2 * math.pi)
+            cr.fill()
+            if self.dragging:
+                cr.set_source_rgba(1, 1, 1, 0.8)
+                cr.set_line_width(2)
+                cr.arc(cx, cy, rad, 0, 2 * math.pi)
+                cr.stroke()
+            cr.set_source_rgba(1, 1, 1, 0.95 if state != "offline" else 0.6)
+            s = rad / 22
+            if state == "busy":
+                for i in (-1, 0, 1):
+                    cr.arc(cx + i * 7 * s, cy, 2.4 * s, 0, 2 * math.pi)
+                    cr.fill()
+            elif slot == "chat":
+                self.draw_mic(cr, cx, cy, s)
+            else:
+                self.draw_prompt(cr, cx, cy, s)
         if look not in ("recording", "listening"):
-            self.draw_gear(cr, w - GEAR_R - 1, h - GEAR_R - 1)
+            self.draw_gear(cr, SIZE - GEAR_R - 1, SIZE - GEAR_R - 1)
+
+    @staticmethod
+    def draw_prompt(cr, cx: float, cy: float, s: float) -> None:
+        """A terminal prompt ">_" for the command button."""
+        cr.set_line_width(2.6 * s)
+        cr.set_line_cap(1)  # round
+        cr.set_line_join(1)
+        cr.move_to(cx - 9 * s, cy - 7 * s)
+        cr.line_to(cx - 2 * s, cy)
+        cr.line_to(cx - 9 * s, cy + 7 * s)
+        cr.stroke()
+        cr.move_to(cx + 1 * s, cy + 7 * s)
+        cr.line_to(cx + 10 * s, cy + 7 * s)
+        cr.stroke()
 
     @staticmethod
     def draw_gear(cr, gx: float, gy: float) -> None:

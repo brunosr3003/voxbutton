@@ -162,7 +162,7 @@ class Settings(Gtk.ApplicationWindow):
         page = box(True, 12)
         page.add_css_class("page")
         page.append(label("Voice commands", "title"))
-        page.append(label("Right-click the button (it turns blue), say the command in English, click again. "
+        page.append(label("Tap the bottom button (>_) or right-click (it turns blue) and say the command in English; it runs when you pause. "
                           "Left-click is plain dictation.", "dim", wrap=True))
         self.cmd_grid = Gtk.Grid(column_spacing=18, row_spacing=10)
         page.append(self.cmd_grid)
@@ -239,7 +239,7 @@ class Settings(Gtk.ApplicationWindow):
 
         page.append(Gtk.Separator(margin_top=8))
         page.append(label("Button", "title"))
-        page.append(label("Left button: dictate · Right button: voice command · Gear: this window · "
+        page.append(label("Top button (mic): dictate · Bottom button (>_) or right-click: voice command · Gear: this window · "
                           "hold the gear and move: drag it.\n"
                           "Colors: dark ready, red dictating, blue command, teal listening, orange "
                           "transcribing, green done, purple error, faded no microphone.", "dim", wrap=True))

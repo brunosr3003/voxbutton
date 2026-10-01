@@ -107,8 +107,11 @@ linux/voxbutton-button.py            # right edge, vertically centered
 linux/voxbutton-button.py --x 20 --y "monitor_h-84"   # bottom-left
 ```
 
-**Left-click** dictates: the text is typed where you were. **Right-click**
-records a **voice command** instead (the button turns blue while it listens):
+Two buttons, stacked: the **mic** (top) dictates, and the text is typed where
+you were. The **`>_`** button (bottom), or a right-click anywhere, records a
+**voice command** instead. It turns blue while it listens, and the command runs
+as soon as you pause. Both work with a single tap, so they're easy to use from
+a phone through Moonlight.
 
 | say | does |
 |---|---|
@@ -152,6 +155,7 @@ hl.exec_cmd("/path/to/voxbutton/linux/voxbutton-button.py")
 Optional, for non-native speakers: after each dictation, a card at the top of
 the screen shows what you said and a corrected, more natural version. What gets
 typed doesn't change; the card is only there to read, and it never takes focus.
+It stays up longer for longer text: about a quarter second per word, up to 25 s.
 It's red when you got something wrong, and green ("looks good") when you said
 it right, if `corrector_show` is `always`.
 Turn it on with the switch in settings → General, or `"corrector": true` in
