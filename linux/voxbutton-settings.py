@@ -208,9 +208,14 @@ class Settings(Gtk.ApplicationWindow):
         self.corrector_show = Gtk.DropDown.new_from_strings([d for _, d in CORRECTOR_SHOW])
         corr.attach(label("Show the card"), 0, 2, 1, 1)
         corr.attach(self.corrector_show, 1, 2, 1, 1)
-        corr.attach(label("Model"), 0, 3, 1, 1)
-        corr.attach(self.corrector_model, 1, 3, 1, 1)
-        corr.attach(label("A local Ollama model; it runs on this computer's GPU.", "dim", wrap=True), 1, 4, 1, 1)
+        self.card_seconds = Gtk.SpinButton.new_with_range(5, 120, 5)
+        corr.attach(label("Card stays at least (s)"), 0, 3, 1, 1)
+        corr.attach(self.card_seconds, 1, 3, 1, 1)
+        corr.attach(label("Plus half a second per word, so long text stays up longer (up to 90 s).", "dim",
+                          wrap=True), 1, 4, 1, 1)
+        corr.attach(label("Model"), 0, 5, 1, 1)
+        corr.attach(self.corrector_model, 1, 5, 1, 1)
+        corr.attach(label("A local Ollama model; it runs on this computer's GPU.", "dim", wrap=True), 1, 6, 1, 1)
         page.append(corr)
 
         page.append(Gtk.Separator(margin_top=8))
@@ -316,6 +321,7 @@ class Settings(Gtk.ApplicationWindow):
             self.corrector.set_active(bool(s.get("corrector")))
             self.corrector_model.set_text(s.get("corrector_model", ""))
             self.corrector_show.set_selected(1 if s.get("corrector_show") == "always" else 0)
+            self.card_seconds.set_value(s.get("card_seconds", 15))
             self.pause.set_value(s.get("listen_pause", 0.6))
             self.chunk.set_value(s.get("listen_chunk", 6))
             self.record_mode.set_selected(modes.index(s.get("record_mode", "toggle"))
@@ -339,7 +345,8 @@ class Settings(Gtk.ApplicationWindow):
                 "record_mode": RECORD_MODES[self.record_mode.get_selected()][0],
                 "listen_pause": self.pause.get_value(), "listen_chunk": self.chunk.get_value(),
                 "corrector": self.corrector.get_active(), "corrector_model": self.corrector_model.get_text().strip(),
-                "corrector_show": CORRECTOR_SHOW[self.corrector_show.get_selected()][0]}
+                "corrector_show": CORRECTOR_SHOW[self.corrector_show.get_selected()][0],
+                "card_seconds": self.card_seconds.get_value()}
         r = api(self.server, self.token, "POST", "/config", body)
         self.save_status.set_text("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 

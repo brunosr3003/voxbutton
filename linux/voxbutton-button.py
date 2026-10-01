@@ -317,7 +317,7 @@ class Button(Gtk.ApplicationWindow):
         script = Path(__file__).with_name("voxbutton-correction.py")
         # Long text stays up longer: about a quarter second per word.
         words = len(c["original"].split()) + (0 if c.get("ok") else len(c["corrected"].split()))
-        seconds = min(10, 3 + words * 0.15) if c.get("ok") else min(25, 5 + words * 0.25)
+        seconds = c.get("seconds") or (min(10, 3 + words * 0.15) if c.get("ok") else min(25, 5 + words * 0.25))
         extra = ["--seconds", f"{seconds:.1f}", *(["--ok"] if c.get("ok") else [])]
         self.correction_proc = subprocess.Popen([sys.executable, str(script), c["original"], c["corrected"], *extra],
                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

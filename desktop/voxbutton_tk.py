@@ -306,7 +306,7 @@ class Button:
             no_activate(w)
         # Long text stays up longer: about a quarter second per word.
         words = len(c["original"].split()) + (0 if c.get("ok") else len(c["corrected"].split()))
-        seconds = min(10, 3 + words * 0.15) if c.get("ok") else min(25, 5 + words * 0.25)
+        seconds = c.get("seconds") or (min(10, 3 + words * 0.15) if c.get("ok") else min(25, 5 + words * 0.25))
         w.after(int(seconds * 1000), lambda: w.winfo_exists() and w.destroy())
         self.correction_win = w
 
@@ -501,6 +501,12 @@ class Settings:
         row = ttk.Frame(f)
         row.pack(anchor="w", pady=2)
         ttk.Label(row, text="Model (Ollama)", width=16).pack(side="left")
+        self.card_secs = tk.DoubleVar(value=15)
+        row2 = ttk.Frame(f)
+        row2.pack(anchor="w", pady=2)
+        ttk.Label(row2, text="Card stays at least (s)", width=22).pack(side="left")
+        ttk.Spinbox(row2, from_=5, to=120, increment=5, textvariable=self.card_secs, width=6).pack(side="left")
+        ttk.Label(row2, text="  plus half a second per word", foreground="#777").pack(side="left")
         ttk.Entry(row, textvariable=self.corr_model, width=24).pack(side="left")
         ttk.Label(f, wraplength=580, foreground="#777", text=(
             "A card at the top of the screen shows what you said and a corrected version; what gets "
@@ -568,6 +574,7 @@ class Settings:
             self.level.set(s.get("min_level", -34))
             self.corr.set(bool(s.get("corrector")))
             self.corr_model.set(s.get("corrector_model", ""))
+            self.card_secs.set(s.get("card_seconds", 15))
             self.corr_show.set(dict(CORRECTOR_SHOW).get(s.get("corrector_show"), CORRECTOR_SHOW[0][1]))
             self.pause.set(s.get("listen_pause", 0.6))
             self.chunk.set(s.get("listen_chunk", 6))
@@ -593,7 +600,8 @@ class Settings:
             "languages": [l.strip() for l in self.langs.get().split(",") if l.strip()], "min_level": level,
             "record_mode": mode, "listen_pause": float(self.pause.get()), "listen_chunk": float(self.chunk.get()),
             "corrector": bool(self.corr.get()), "corrector_model": self.corr_model.get().strip(),
-            "corrector_show": next((k for k, d in CORRECTOR_SHOW if d == self.corr_show.get()), "changes")})
+            "corrector_show": next((k for k, d in CORRECTOR_SHOW if d == self.corr_show.get()), "changes"),
+            "card_seconds": float(self.card_secs.get())})
         self.saved.set("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 
 

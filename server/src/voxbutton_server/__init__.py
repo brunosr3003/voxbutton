@@ -50,6 +50,7 @@ DEFAULTS = {
     "corrector": False,  # show a corrected version of your English after each dictation
     "corrector_model": "qwen2.5:3b",  # an Ollama model
     "corrector_show": "changes",  # "changes": only when it corrected something · "always": every dictation
+    "card_seconds": 15,  # the correction card stays at least this long, plus half a second per word
     "corrector_url": "http://127.0.0.1:11434",  # where Ollama listens
 }
 RECORD_MODES = ("toggle", "hold", "always")
@@ -198,6 +199,14 @@ class Corrector:
     def __init__(self, enabled: bool, model: str, url: str, show: str = "changes"):
         self.enabled, self.model, self.url = enabled, model, url.rstrip("/")
         self.show = show if show in ("changes", "always") else "changes"
+        self.card_seconds = 15.0
+
+    def seconds(self, original: str, corrected: str, ok: bool) -> float:
+        """How long the card stays: long enough to read it and fix your sentence."""
+        if ok:
+            return min(20.0, max(6.0, self.card_seconds * 0.4) + 0.2 * len(original.split()))
+        words = len(original.split()) + len(corrected.split())
+        return min(90.0, self.card_seconds + 0.5 * words)
 
     def _post(self, path: str, body: dict, timeout: float) -> dict:
         req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(),
@@ -483,6 +492,7 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         "corrector": corrector.enabled,
                         "corrector_model": corrector.model,
                         "corrector_show": corrector.show,
+                        "card_seconds": corrector.card_seconds,
                     },
                     "connect": {**urls, "token": token},
                     "commands": commands.CATALOG,
@@ -537,6 +547,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                     if "corrector" in body:
                         corrector.enabled = bool(body["corrector"])
                         corrector.warm()
+                    if "card_seconds" in body:
+                        corrector.card_seconds = min(max(float(body["card_seconds"]), 5.0), 120.0)
                     if body.get("corrector_show") in ("changes", "always"):
                         corrector.show = body["corrector_show"]
                     if body.get("corrector_model"):
@@ -548,7 +560,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 save_config({"languages": transcribe.languages, "min_level": transcribe.min_level,
                              "record_mode": remote.record_mode, "listen_pause": remote.listen["pause"],
                              "listen_chunk": remote.listen["chunk"], "corrector": corrector.enabled,
-                             "corrector_model": corrector.model, "corrector_show": corrector.show})
+                             "corrector_model": corrector.model, "corrector_show": corrector.show,
+                             "card_seconds": corrector.card_seconds})
                 log(f"settings: languages={transcribe.languages} min_level={transcribe.min_level} "
                     f"record_mode={remote.record_mode}")
                 return self.reply(200, {"ok": True})
@@ -640,7 +653,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
             log(f"  {'looks good' if ok else 'corrected'} in {time.time() - t:.2f}s: {better!r}")
             with remote.cond:
                 remote.correction = {"id": remote.correction["id"] + 1, "original": text,
-                                     "corrected": text if ok else better, "ok": ok}
+                                     "corrected": text if ok else better, "ok": ok,
+                                     "seconds": corrector.seconds(text, better, ok)}
 
     return Handler
 
@@ -695,6 +709,7 @@ def main() -> None:
     remote.record_mode = cfg["record_mode"] if cfg["record_mode"] in RECORD_MODES else "toggle"
     remote.listen = {"pause": float(cfg["listen_pause"]), "chunk": float(cfg["listen_chunk"])}
     corrector = Corrector(bool(cfg["corrector"]), cfg["corrector_model"], cfg["corrector_url"], cfg["corrector_show"])
+    corrector.card_seconds = float(cfg["card_seconds"])
     handler = make_handler(transcriber, remote, token, cfg["type"], set(cfg["trust"]),
                            {"local": f"http://{host}:{cfg['port']}", "public": cfg["public_url"]}, corrector)
     server = ThreadingHTTPServer((host, int(cfg["port"])), handler)
