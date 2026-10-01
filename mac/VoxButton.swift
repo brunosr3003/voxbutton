@@ -181,7 +181,9 @@ final class App: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 switch cmd {
                 case "listen" where self.recorder == nil && self.listener == nil:
-                    let l = Listener { [weak self] wav in DispatchQueue.main.async { self?.upload(wav, segment: true) } }
+                    let l = Listener(pause: json?["pause"] as? Double ?? 0.6, chunk: json?["chunk"] as? Double ?? 6) {
+                        [weak self] wav in DispatchQueue.main.async { self?.upload(wav, segment: true) }
+                    }
                     if l.start() { self.listener = l } else { self.reportAgentError("can't listen: check microphone permission") }
                 case "stop" where self.listener != nil:
                     self.listener?.stop()
@@ -315,31 +317,38 @@ final class App: NSObject, NSApplicationDelegate {
     }
 }
 
-/// "Always on": keeps the mic open and hands over each stretch of speech,
-/// cut at the pauses, as a 16 kHz mono WAV.
+/// "Always on": keeps the mic open and hands over what you say as 16 kHz mono
+/// WAVs: at every pause, and every `chunk` seconds while you keep talking (cut
+/// at the quietest moment of the last 1.5 s, so words stay whole).
 final class Listener {
     static let speech: Float = -40  // dBFS: louder than this counts as talking
-    static let pause = 0.8  // s of quiet that ends a segment
     static let preroll = 0.3  // s kept from before the speech started
-    static let maxLength = 25.0  // s, a segment is sent even without a pause
+    static let bytesPerSecond = 32000.0
 
+    private let pause: Double
+    private let chunk: Double
     private let engine = AVAudioEngine()
     private let onSegment: (Data) -> Void
     private let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
     private var converter: AVAudioConverter?
     private var ring = Data()  // recent audio before speech starts
     private var current = Data()
+    private var frames: [(end: Int, level: Float)] = []  // per buffer in `current`
     private var talking = false
     private var quiet = 0.0
 
-    init(onSegment: @escaping (Data) -> Void) { self.onSegment = onSegment }
+    init(pause: Double, chunk: Double, onSegment: @escaping (Data) -> Void) {
+        self.pause = pause
+        self.chunk = chunk
+        self.onSegment = onSegment
+    }
 
     func start() -> Bool {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, let conv = AVAudioConverter(from: format, to: target) else { return false }
         converter = conv
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in self?.feed(buf) }
+        input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buf, _ in self?.feed(buf) }
         do {
             try engine.start()
             return true
@@ -352,7 +361,7 @@ final class Listener {
     func stop() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        if talking { flush() }
+        if talking { send(upTo: current.count) }
     }
 
     private func feed(_ buf: AVAudioPCMBuffer) {
@@ -371,30 +380,49 @@ final class Listener {
         var sum: Float = 0
         for i in 0..<n { let v = Float(p[0][i]) / 32768; sum += v * v }
         let level = 10 * log10(max(sum / Float(n), 1e-12))
-        let chunk = Data(bytes: p[0], count: n * 2)
-        let seconds = Double(n) / target.sampleRate
+        let bytes = Data(bytes: p[0], count: n * 2)
 
         if talking {
-            current.append(chunk)
-            quiet = level < Self.speech ? quiet + seconds : 0
-            if quiet >= Self.pause || Double(current.count) / 32000 >= Self.maxLength { flush() }
+            current.append(bytes)
+            frames.append((current.count, level))
+            quiet = level < Self.speech ? quiet + Double(n) / target.sampleRate : 0
+            if quiet >= pause {
+                send(upTo: current.count)
+            } else if Double(current.count) / Self.bytesPerSecond >= chunk {
+                send(upTo: quietestCut())
+            }
         } else if level >= Self.speech {
             talking = true
             quiet = 0
-            current = ring + chunk
+            current = ring + bytes
+            frames = [(ring.count, -120), (current.count, level)]
         } else {
-            ring.append(chunk)
-            let keep = Int(Self.preroll * 32000) & ~1
+            ring.append(bytes)
+            let keep = Int(Self.preroll * Self.bytesPerSecond) & ~1
             if ring.count > keep { ring = ring.suffix(keep) }
         }
     }
 
-    private func flush() {
-        let pcm = current
-        talking = false
-        current = Data()
-        ring = Data()
-        if Double(pcm.count) / 32000 >= 0.4 { onSegment(Listener.wav(pcm)) }
+    /// End of the quietest buffer in the last 1.5 s: the gap between two words.
+    private func quietestCut() -> Int {
+        let from = current.count - Int(1.5 * Self.bytesPerSecond)
+        let candidates = frames.filter { $0.end >= from && $0.end < current.count }
+        return candidates.min { $0.level < $1.level }?.end ?? current.count
+    }
+
+    /// Sends current[..<cut]; whatever follows stays as the start of the next piece.
+    private func send(upTo cut: Int) {
+        let piece = Data(current.prefix(cut))
+        if cut >= current.count {
+            talking = false
+            current = Data()
+            frames = []
+            ring = Data()
+        } else {
+            current = Data(current.suffix(from: current.startIndex + cut))
+            frames = frames.filter { $0.end > cut }.map { ($0.end - cut, $0.level) }
+        }
+        if Double(piece.count) / Self.bytesPerSecond >= 0.4 { onSegment(Listener.wav(piece)) }
     }
 
     static func wav(_ pcm: Data) -> Data {

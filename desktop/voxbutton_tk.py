@@ -401,6 +401,16 @@ class Settings:
         ttk.Label(f, wraplength=580, foreground="#777", text=(
             "Always on: start a sentence with “command” to run it as one, e.g. “command next tab”. "
             "In hold mode, drag the button by its gear.")).pack(anchor="w", pady=(2, 6))
+        self.pause = tk.DoubleVar(value=0.6)
+        self.chunk = tk.DoubleVar(value=6)
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=2)
+        ttk.Label(row, text="Always on: send after a pause of (s)", width=36).pack(side="left")
+        ttk.Spinbox(row, from_=0.2, to=3.0, increment=0.1, textvariable=self.pause, width=6).pack(side="left")
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=2)
+        ttk.Label(row, text="Always on: while talking, send every (s)", width=36).pack(side="left")
+        ttk.Spinbox(row, from_=2, to=30, increment=1, textvariable=self.chunk, width=6).pack(side="left")
         self.auto = tk.BooleanVar(value=autostart.enabled())
         ttk.Checkbutton(f, text="Start with the computer", variable=self.auto,
                         command=self.on_autostart).pack(anchor="w")
@@ -467,6 +477,8 @@ class Settings:
             self.model.set(s.get("model", ""))
             self.langs.set(",".join(s.get("languages") or []))
             self.level.set(s.get("min_level", -34))
+            self.pause.set(s.get("listen_pause", 0.6))
+            self.chunk.set(s.get("listen_chunk", 6))
             self.rec_mode.set(dict(RECORD_MODES).get(s.get("record_mode"), RECORD_MODES[0][1]))
             self.loaded = True
 
@@ -487,7 +499,7 @@ class Settings:
         mode = next((m for m, d in RECORD_MODES if d == self.rec_mode.get()), "toggle")
         r = self.client.call("POST", "/config", {
             "languages": [l.strip() for l in self.langs.get().split(",") if l.strip()], "min_level": level,
-            "record_mode": mode})
+            "record_mode": mode, "listen_pause": float(self.pause.get()), "listen_chunk": float(self.chunk.get())})
         self.saved.set("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 
 

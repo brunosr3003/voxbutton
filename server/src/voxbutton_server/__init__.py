@@ -44,6 +44,8 @@ DEFAULTS = {
     "public_url": "",  # HTTPS address for devices outside the tailnet, shown in settings
     "type": True,  # type the text; false only returns it
     "record_mode": "toggle",  # toggle: click/click · hold: push-to-talk · always: keeps listening
+    "listen_pause": 0.6,  # always on: seconds of quiet that send what you said
+    "listen_chunk": 6.0,  # always on: while you keep talking, send about this often (seconds)
 }
 RECORD_MODES = ("toggle", "hold", "always")
 
@@ -240,6 +242,7 @@ class Remote:
         self.cond = threading.Condition()
         self.state = "idle"  # idle | recording | busy | listening
         self.record_mode = "toggle"
+        self.listen = {"pause": 0.6, "chunk": 6.0}  # sent to agents along with "listen"
         self.since = time.time()
         self.agents: dict[str, dict] = {}  # name -> {"seen", "prio", "gen"}
         self.cmds: dict[str, str] = {}
@@ -411,6 +414,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         "languages": transcribe.languages,
                         "min_level": transcribe.min_level,
                         "record_mode": remote.record_mode,
+                        "listen_pause": remote.listen["pause"],
+                        "listen_chunk": remote.listen["chunk"],
                     },
                     "connect": {**urls, "token": token},
                     "commands": commands.CATALOG,
@@ -426,7 +431,8 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                 # they report their own (e.g. the iPhone's Tailscale IP).
                 ips = {ip for ip in q.get("ips", [""])[0].split(",") if ip}
                 ips.add(self.client_address[0])
-                self.reply(200, {"cmd": remote.wait(name, prio, ips)})
+                cmd = remote.wait(name, prio, ips)
+                self.reply(200, {"cmd": cmd, **(remote.listen if cmd == "listen" else {})})
             else:
                 self.reply(404, {"error": "not found"})
 
@@ -457,10 +463,15 @@ def make_handler(transcribe: Transcriber, remote: Remote, token: str, do_type: b
                         transcribe.min_level = float(body["min_level"])
                     if body.get("record_mode") in RECORD_MODES:
                         remote.record_mode = body["record_mode"]
+                    if "listen_pause" in body:
+                        remote.listen["pause"] = min(max(float(body["listen_pause"]), 0.2), 3.0)
+                    if "listen_chunk" in body:
+                        remote.listen["chunk"] = min(max(float(body["listen_chunk"]), 2.0), 30.0)
                 except (ValueError, TypeError, AttributeError) as e:
                     return self.reply(400, {"error": str(e)})
                 save_config({"languages": transcribe.languages, "min_level": transcribe.min_level,
-                             "record_mode": remote.record_mode})
+                             "record_mode": remote.record_mode, "listen_pause": remote.listen["pause"],
+                             "listen_chunk": remote.listen["chunk"]})
                 log(f"settings: languages={transcribe.languages} min_level={transcribe.min_level} "
                     f"record_mode={remote.record_mode}")
                 return self.reply(200, {"ok": True})
@@ -588,6 +599,7 @@ def main() -> None:
                               cfg["prompt"] or None, cfg["languages"], float(cfg["min_level"]))
     remote = Remote(StreamWatcher())
     remote.record_mode = cfg["record_mode"] if cfg["record_mode"] in RECORD_MODES else "toggle"
+    remote.listen = {"pause": float(cfg["listen_pause"]), "chunk": float(cfg["listen_chunk"])}
     handler = make_handler(transcriber, remote, token, cfg["type"], set(cfg["trust"]),
                            {"local": f"http://{host}:{cfg['port']}", "public": cfg["public_url"]})
     server = ThreadingHTTPServer((host, int(cfg["port"])), handler)

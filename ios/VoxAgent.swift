@@ -173,10 +173,11 @@ final class Agent: ObservableObject {
                     continue
                 }
                 if !recording { status = "Ready" }
-                let cmd = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["cmd"] as? String
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let cmd = json?["cmd"] as? String
                 switch cmd {
                 case "start": begin()
-                case "listen": listen()
+                case "listen": listen(pause: json?["pause"] as? Double ?? 0.6, chunk: json?["chunk"] as? Double ?? 6)
                 case "stop" where listening: stopListening()
                 case "stop": await finish()
                 default: break
@@ -191,12 +192,12 @@ final class Agent: ObservableObject {
 
     @Published var listening = false
 
-    private func listen() {
+    private func listen(pause: Double, chunk: Double) {
         if !engine.isRunning { restartAudio() }
         capture.onSegment = { [weak self] pcm in
             Task { @MainActor in await self?.send(pcm, segment: true) }
         }
-        capture.listen()
+        capture.listen(pause: pause, chunk: chunk)
         listening = true
         recording = true
         status = "Listening…"
@@ -281,26 +282,38 @@ final class Agent: ObservableObject {
 }
 
 /// Audio collected on the realtime thread, read on the main actor. In listen
-/// mode ("always on") it cuts the stream at pauses and hands each piece over.
+/// mode ("always on") it hands over what you say at every pause, and every
+/// `chunk` seconds while you keep talking (cut at the quietest moment of the
+/// last 1.5 s, so words stay whole).
 final class Capture: @unchecked Sendable {
     static let speech: Float = -40  // dBFS: louder than this counts as talking
-    static let pause = 0.8  // s of quiet that ends a segment
     static let preroll = 0.3  // s kept from before the speech started
-    static let maxLength = 25.0  // s
+    static let bytesPerSecond = 32000.0
 
     private let lock = NSLock()
     private var data = Data()
+    private var frames: [(end: Int, level: Float)] = []
     private var mode = 0  // 0 off, 1 recording, 2 listening
     private var ring = Data()
     private var talking = false
     private var quiet = 0.0
+    private var pause = 0.6
+    private var chunk = 6.0
     var onSegment: ((Data) -> Void)?
 
     var active: Bool { lock.withLock { mode != 0 } }
 
     func start() { lock.withLock { data.removeAll(); mode = 1 } }
 
-    func listen() { lock.withLock { data.removeAll(); ring.removeAll(); talking = false; mode = 2 } }
+    func listen(pause: Double, chunk: Double) {
+        lock.withLock {
+            data.removeAll(); frames.removeAll(); ring.removeAll()
+            talking = false
+            self.pause = pause
+            self.chunk = chunk
+            mode = 2
+        }
+    }
 
     func stop() -> Data {
         let (out, segment) = lock.withLock { () -> (Data, Data?) in
@@ -322,26 +335,43 @@ final class Capture: @unchecked Sendable {
             case 2:
                 if talking {
                     data.append(d)
+                    frames.append((data.count, level))
                     quiet = level < Self.speech ? quiet + seconds : 0
-                    if quiet >= Self.pause || Double(data.count) / 32000 >= Self.maxLength {
-                        if data.count >= 12800 { ready = data }  // >= 0.4 s
-                        data.removeAll()
-                        ring.removeAll()
-                        talking = false
+                    if quiet >= pause {
+                        ready = take(upTo: data.count)
+                    } else if Double(data.count) / Self.bytesPerSecond >= chunk {
+                        let from = data.count - Int(1.5 * Self.bytesPerSecond)
+                        let cut = frames.filter { $0.end >= from && $0.end < data.count }
+                            .min { $0.level < $1.level }?.end ?? data.count
+                        ready = take(upTo: cut)
                     }
                 } else if level >= Self.speech {
                     talking = true
                     quiet = 0
                     data = ring + d
+                    frames = [(ring.count, -120), (data.count, level)]
                 } else {
                     ring.append(d)
-                    let keep = Int(Self.preroll * 32000) & ~1
+                    let keep = Int(Self.preroll * Self.bytesPerSecond) & ~1
                     if ring.count > keep { ring = ring.suffix(keep) }
                 }
             default:
                 break
             }
         }
-        if let ready { onSegment?(ready) }
+        if let ready, ready.count >= 12800 { onSegment?(ready) }  // >= 0.4 s
+    }
+
+    /// Takes data[..<cut]; the rest stays as the start of the next piece. Lock held.
+    private func take(upTo cut: Int) -> Data {
+        let piece = Data(data.prefix(cut))
+        if cut >= data.count {
+            data.removeAll(); frames.removeAll(); ring.removeAll()
+            talking = false
+        } else {
+            data = Data(data.suffix(from: data.startIndex + cut))
+            frames = frames.filter { $0.end > cut }.map { ($0.end - cut, $0.level) }
+        }
+        return piece
     }
 }

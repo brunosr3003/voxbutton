@@ -166,6 +166,14 @@ class Settings(Gtk.ApplicationWindow):
         rec.attach(self.record_mode, 1, 0, 1, 1)
         rec.attach(label("Always on: start a sentence with “command” to run it as one, e.g. "
                          "“command next tab”. In hold mode, drag the button by its gear.", "dim", wrap=True), 1, 1, 1, 1)
+        self.pause = Gtk.SpinButton.new_with_range(0.2, 3.0, 0.1)
+        self.chunk = Gtk.SpinButton.new_with_range(2, 30, 1)
+        rec.attach(label("Always on: send after a pause of (s)"), 0, 4, 1, 1)
+        rec.attach(self.pause, 1, 4, 1, 1)
+        rec.attach(label("Always on: while talking, send every (s)"), 0, 5, 1, 1)
+        rec.attach(self.chunk, 1, 5, 1, 1)
+        rec.attach(label("Long speech goes out in pieces as you talk, cut between words.", "dim", wrap=True),
+                   1, 6, 1, 1)
         self.autostart = Gtk.Switch(halign=Gtk.Align.START, active=autostart.enabled())
         self.autostart.connect("state-set", self.on_autostart)
         rec.attach(label("Start with the computer"), 0, 2, 1, 1)
@@ -274,6 +282,8 @@ class Settings(Gtk.ApplicationWindow):
             self.langs.set_text(",".join(s.get("languages") or []))
             self.min_level.set_value(s.get("min_level", -34))
             modes = [m for m, _ in RECORD_MODES]
+            self.pause.set_value(s.get("listen_pause", 0.6))
+            self.chunk.set_value(s.get("listen_chunk", 6))
             self.record_mode.set_selected(modes.index(s.get("record_mode", "toggle"))
                                           if s.get("record_mode") in modes else 0)
             self.general_loaded = True
@@ -292,7 +302,8 @@ class Settings(Gtk.ApplicationWindow):
     def save(self, *_):
         body = {"languages": [l for l in self.langs.get_text().split(",") if l.strip()],
                 "min_level": self.min_level.get_value(),
-                "record_mode": RECORD_MODES[self.record_mode.get_selected()][0]}
+                "record_mode": RECORD_MODES[self.record_mode.get_selected()][0],
+                "listen_pause": self.pause.get_value(), "listen_chunk": self.chunk.get_value()}
         r = api(self.server, self.token, "POST", "/config", body)
         self.save_status.set_text("Saved" if r.get("ok") else f"Not saved: {r.get('error')}")
 
